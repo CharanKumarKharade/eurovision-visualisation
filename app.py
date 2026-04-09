@@ -30,7 +30,7 @@ ROOT_END = 2025
 ERA_MAX = {y: 12 for y in range(1975, 2016)}
 ERA_MAX.update({y: 24 for y in range(2016, 2026)})
 
-# Better thesis-friendly blue scale
+
 NVS_SCALE = [
     [0.00, "#f8fbff"],
     [0.08, "#edf5fc"],
@@ -43,7 +43,6 @@ NVS_SCALE = [
     [1.00, "#0b3c6f"],
 ]
 
-# Better diverging correlation scale
 CORR_SCALE = [
     [0.00, "#2b6cb0"],
     [0.15, "#5b9bd5"],
