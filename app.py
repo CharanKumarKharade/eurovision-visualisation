@@ -21,6 +21,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+import matplotlib.cm as cm
 
 try:
     import networkx as nx
@@ -937,6 +938,189 @@ def make_community_network_figure(G, communities_df):
     return fig
 
 
+def build_directed_graph_from_nvs(matrix_df, min_edge_weight=0.0, weight_scale=1.0):
+    """
+    Build a directed graph from the NVS matrix.
+    Edges are directed and weighted by NVS intensity.
+    
+    Args:
+        matrix_df: NVS score matrix (index and columns are country labels)
+        min_edge_weight: drop edges below this threshold
+        weight_scale: multiplier for edge width scaling
+    
+    Returns:
+        directed networkx graph
+    """
+    if not NETWORKX_OK:
+        return None
+    
+    G = nx.DiGraph()
+    countries = list(matrix_df.index)
+    
+    for c in countries:
+        G.add_node(c)
+    
+    # Add directed edges with weights from the NVS matrix
+    for src in countries:
+        for tgt in countries:
+            if src != tgt:
+                weight = float(matrix_df.loc[src, tgt])
+                if weight >= min_edge_weight:
+                    # Scale the weight for visualization
+                    G.add_edge(src, tgt, weight=weight, display_weight=weight * weight_scale)
+    
+    return G
+
+
+def make_directed_network_figure(G, communities_df, show_labels=True, min_node_size=20, title=None):
+    """
+    Render a directed network with visible arrowheads, edge width by intensity,
+    and node colors by Louvain community.
+    
+    Args:
+        G: directed networkx graph
+        communities_df: dataframe with community assignments
+        show_labels: whether to show country labels
+        min_node_size: minimum node size
+    
+    Returns:
+        plotly figure
+    """
+    if G is None or G.number_of_nodes() == 0:
+        return None
+    
+    # Build undirected version for layout (spring layout works better on undirected)
+    G_undirected = G.to_undirected()
+    pos = nx.spring_layout(G_undirected, weight="weight", seed=42, k=1.5, iterations=50)
+    
+    # Build community lookup
+    community_lookup = {}
+    for _, row in communities_df.iterrows():
+        members = [m.strip() for m in row["Members"].split(",")]
+        for m in members:
+            community_lookup[m] = row["Community"]
+    
+    community_names = sorted(communities_df["Community"].unique().tolist())
+    community_to_num = {c: i for i, c in enumerate(community_names)}
+    
+    # Get max weight for normalization
+    max_weight = max([data.get("display_weight", 1.0) for _, _, data in G.edges(data=True)], default=1.0)
+    if max_weight == 0:
+        max_weight = 1.0
+    
+    # Prepare edges with directional arrows and color gradient
+    edge_traces = []
+    arrow_annotations = []
+    
+    # Color palette: cool to hot based on intensity
+    cmap = cm.get_cmap('YlOrRd')  # Yellow → Orange → Red gradient
+    
+    for u, v, data in G.edges(data=True):
+        x0, y0 = pos[u]
+        x1, y1 = pos[v]
+
+        weight = data.get("display_weight", 1.0)
+        norm_weight = np.clip(weight / max_weight, 0, 1)
+        r, g, b, _ = cmap(norm_weight)
+        edge_color = f"rgba({int(r * 255)}, {int(g * 255)}, {int(b * 255)}, 0.8)"
+
+        edge_traces.append(
+            go.Scatter(
+                x=[x0, x1],
+                y=[y0, y1],
+                mode="lines",
+                line=dict(width=0.8 + (2.8 * norm_weight), color=edge_color),
+                hoverinfo="none",
+                showlegend=False
+            )
+        )
+
+        arrow_annotations.append(
+            dict(
+                x=x1,
+                y=y1,
+                ax=x0,
+                ay=y0,
+                xref="x",
+                yref="y",
+                axref="x",
+                ayref="y",
+                showarrow=True,
+                arrowhead=3,
+                arrowsize=1,
+                arrowwidth=1.2 + (1.8 * norm_weight),
+                arrowcolor=edge_color,
+                opacity=0.9
+            )
+        )
+    
+    # Prepare nodes
+    node_x = []
+    node_y = []
+    node_text = []
+    node_color = []
+    node_size = []
+    
+    max_degree = max([d for n, d in G.degree(weight="weight")], default=1.0)
+    if max_degree == 0:
+        max_degree = 1.0
+    
+    for node in G.nodes():
+        x, y = pos[node]
+        comm = community_lookup.get(node, "NA")
+        
+        # Node size based on total degree (influence)
+        out_degree = G.out_degree(node, weight="weight")
+        in_degree = G.in_degree(node, weight="weight")
+        total_degree = out_degree + in_degree
+        size = min_node_size + (total_degree / max_degree * 30)
+        
+        node_x.append(x)
+        node_y.append(y)
+        node_text.append(f"<b>{node}</b><br>Community: {comm}<br>Out: {out_degree:.1f}<br>In: {in_degree:.1f}")
+        node_color.append(community_to_num.get(comm, 0))
+        node_size.append(size)
+    
+    node_trace = go.Scatter(
+        x=node_x,
+        y=node_y,
+        mode="markers+text" if show_labels else "markers",
+        text=list(G.nodes()) if show_labels else [],
+        textposition="top center",
+        hovertext=node_text,
+        hovertemplate="%{hovertext}<extra></extra>",
+        marker=dict(
+            size=node_size,
+            color=node_color,
+            colorscale="Turbo",
+            line=dict(width=2, color="#ffffff"),
+            showscale=False
+        ),
+        name="Countries"
+    )
+    
+    # Combine all traces
+    fig_traces = edge_traces + [node_trace]
+    
+    fig = go.Figure(data=fig_traces)
+    
+    # Add arrows as annotations
+    fig.update_layout(
+        annotations=arrow_annotations,
+        title=title or "Directed Voting Network (Normalized Votes) with Communities",
+        height=750,
+        showlegend=False,
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        margin=dict(l=20, r=20, t=80, b=20),
+        xaxis=dict(showgrid=False, zeroline=False, visible=False),
+        yaxis=dict(showgrid=False, zeroline=False, visible=False),
+        hovermode="closest"
+    )
+    
+    return fig
+
+
 # =============================================================================
 # SIDEBAR CONTROLS
 # =============================================================================
@@ -1504,6 +1688,72 @@ else:
 
         if fig_community is not None:
             st.plotly_chart(fig_community, use_container_width=True)
+
+        st.markdown("---")
+        st.markdown("### Directed voting network inside each community")
+        st.caption("Each community below uses the directed NVS edges only between countries in that community.")
+
+        # Controls for directed graph
+        col_dir1, col_dir2 = st.columns(2)
+
+        with col_dir1:
+            directed_edge_threshold = st.slider(
+                "Edge threshold (directed graph)",
+                min_value=0.0,
+                max_value=6.0,
+                value=0.5,
+                step=0.25,
+                help="Only show edges with NVS >= this value"
+            )
+
+        with col_dir2:
+            directed_weight_scale = st.slider(
+                "Edge width scale",
+                min_value=0.5,
+                max_value=3.0,
+                value=1.0,
+                step=0.1,
+                help="Multiplier for edge thickness"
+            )
+
+        # Build the full directed graph once, then split it by community.
+        directed_graph = build_directed_graph_from_nvs(
+            m_nvs,
+            min_edge_weight=directed_edge_threshold,
+            weight_scale=directed_weight_scale
+        )
+
+        if directed_graph is not None and directed_graph.number_of_nodes() > 0:
+            for _, community_row in communities_df.iterrows():
+                community_name = community_row["Community"]
+                members = [m.strip() for m in community_row["Members"].split(",") if m.strip()]
+                community_nodes = [node for node in members if node in directed_graph]
+
+                st.markdown(f"#### {community_name}")
+                st.caption(
+                    f"Size: {int(community_row['Size'])} | Members: {community_row['Members']}"
+                )
+
+                community_subgraph = directed_graph.subgraph(community_nodes).copy()
+
+                if community_subgraph.number_of_nodes() == 0:
+                    st.info(f"No directed nodes available for {community_name} after filtering.")
+                    continue
+
+                fig_directed = make_directed_network_figure(
+                    community_subgraph,
+                    communities_df,
+                    show_labels=True,
+                    min_node_size=25,
+                    title=f"{community_name} directed voting network"
+                )
+
+                if fig_directed is not None:
+                    st.plotly_chart(fig_directed, use_container_width=True)
+                else:
+                    st.info(f"No directed edges meet the current threshold inside {community_name}.")
+        else:
+            st.info("No edges meet the current threshold. Try lowering the edge threshold.")
 
 
 # =============================================================================
