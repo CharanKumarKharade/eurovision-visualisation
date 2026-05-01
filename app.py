@@ -242,10 +242,264 @@ def filter_agg_by_order(agg: pd.DataFrame, order: list[str]) -> pd.DataFrame:
     ].copy()
 
 
+def _selected_row_indices(selection_state):
+    if selection_state is None:
+        return []
+
+    if isinstance(selection_state, dict):
+        return list(selection_state.get("selection", {}).get("rows", []))
+
+    selection = getattr(selection_state, "selection", None)
+    if selection is None:
+        return []
+
+    return list(getattr(selection, "rows", []))
+
+
+def set_selected_pair(source: str, target: str, origin: str | None = None):
+    st.session_state["selected_pair_source"] = source
+    st.session_state["selected_pair_target"] = target
+    st.session_state["pair_trend_requested"] = True
+
+    if origin:
+        st.session_state["selected_pair_origin"] = origin
+
+
+def update_selected_pair_from_table(selection_state, table_df: pd.DataFrame, source_col: str, target_col: str, origin: str):
+    rows = _selected_row_indices(selection_state)
+    if not rows:
+        return None
+
+    row = table_df.iloc[rows[0]]
+    source = str(row[source_col])
+    target = str(row[target_col])
+
+    set_selected_pair(source, target, origin)
+    return source, target
+
+
+def build_pair_interval_summary(pair_rows: pd.DataFrame, start_year: int, end_year: int, interval_years: int = 5) -> pd.DataFrame:
+    rows = []
+
+    for interval_start in range(start_year, end_year + 1, interval_years):
+        interval_end = min(interval_start + interval_years - 1, end_year)
+        interval_df = pair_rows[
+            (pair_rows["year"] >= interval_start)
+            & (pair_rows["year"] <= interval_end)
+        ].copy()
+
+        if interval_df.empty:
+            continue
+
+        values = (interval_df["nvs_year"].to_numpy(dtype=float) * 12)
+        years = interval_df["year"].to_numpy(dtype=int)
+
+        mean_v = float(np.mean(values))
+        std_v = float(np.std(values))
+        cv_v = float(std_v / (mean_v + 1e-6))
+        slope_v = linear_trend_slope(years, values)
+        stability = float(max(0.0, 1.0 - cv_v))
+        relationship_class = classify_relationship(mean_v, std_v, cv_v, slope_v, stability)
+        status_counts = interval_df["status"].value_counts()
+
+        rows.append({
+            "Interval": f"{interval_start}–{interval_end}",
+            "Years": int(interval_df["year"].nunique()),
+            "Mean NVS": mean_v,
+            "Std Dev": std_v,
+            "Trend Slope": slope_v,
+            "Stability": stability,
+            "Relationship Class": relationship_class,
+            "Years gave points": int(status_counts.get("voted", 0)),
+            "Years gave 0": int(status_counts.get("abstained", 0)),
+        })
+
+    return pd.DataFrame(rows)
+
+
+def build_pair_interval_figure(
+    pair_rows: pd.DataFrame,
+    source_country: str,
+    target_country: str,
+    start_year: int,
+    end_year: int,
+    interval_years: int = 5,
+):
+    fig_pair = go.Figure()
+
+    palette = [
+        "#0b3c6f",
+        "#2f7fbe",
+        "#5ea7d8",
+        "#93c3e5",
+        "#165a9c",
+        "#2166ac",
+        "#4c78a8",
+        "#8da0cb",
+        "#7b3294",
+        "#c51b7d",
+    ]
+
+    segment_count = 0
+
+    for interval_start in range(start_year, end_year + 1, interval_years):
+        interval_end = min(interval_start + interval_years - 1, end_year)
+        interval_df = pair_rows[
+            (pair_rows["year"] >= interval_start)
+            & (pair_rows["year"] <= interval_end)
+        ].sort_values("year")
+
+        if interval_df.empty:
+            continue
+
+        color = palette[segment_count % len(palette)]
+        segment_count += 1
+
+        fig_pair.add_trace(go.Scatter(
+            x=interval_df["year"],
+            y=interval_df["nvs_year"] * 12,
+            mode="lines+markers",
+            name=f"{interval_start}–{interval_end}",
+            line=dict(color=color, width=3),
+            marker=dict(color=color, size=8),
+            hovertemplate=(
+                "Year %{x}<br>"
+                "NVS %{y:.2f}<br>"
+                f"Interval: {interval_start}–{interval_end}<extra></extra>"
+            ),
+        ))
+
+    if not pair_rows.empty:
+        values = (pair_rows["nvs_year"].to_numpy(dtype=float) * 12)
+        years = pair_rows["year"].to_numpy(dtype=int)
+        mean_v = float(np.mean(values))
+        cp_idx, cp_score = compute_simple_change_point(values)
+        cp_year = int(years[cp_idx]) if cp_idx is not None else None
+
+        fig_pair.add_hline(
+            y=mean_v,
+            line_dash="dot",
+            line_color="#5ea7d8",
+            annotation_text=f"mean {mean_v:.2f}",
+            annotation_position="top right"
+        )
+
+        if cp_year is not None:
+            fig_pair.add_vline(
+                x=cp_year,
+                line_width=2,
+                line_dash="dash",
+                line_color="red",
+                annotation_text=f"change ~{cp_year}",
+                annotation_position="top left"
+            )
+
+    fig_pair.update_layout(
+        title=f"Pair trend: {source_country} → {target_country}",
+        xaxis_title="Year",
+        yaxis_title="NVS (0–12)",
+        yaxis=dict(range=[-0.5, 13]),
+        legend=dict(orientation="h", y=-0.2),
+        height=520,
+        paper_bgcolor="white",
+        plot_bgcolor="white"
+    )
+
+    return fig_pair
+
+
+def build_full_pair_figure(pair_rows: pd.DataFrame, source_country: str, target_country: str):
+    years_all = pair_rows["year"].to_numpy()
+    nvs_all = pair_rows["nvs_year"].to_numpy() * 12
+    status_all = pair_rows["status"].to_numpy()
+
+    voted_mask = status_all == "voted"
+    abstained_mask = status_all == "abstained"
+    absent_mask = status_all == "absent"
+
+    fig = go.Figure()
+
+    fig.add_trace(go.Scatter(
+        x=years_all[voted_mask],
+        y=nvs_all[voted_mask],
+        mode="markers",
+        name="Gave points",
+        marker=dict(size=8, color="#2f7fbe", symbol="circle"),
+        hovertemplate="Year %{x}<br>NVS %{y:.2f}<br>Status: gave points<extra></extra>"
+    ))
+
+    fig.add_trace(go.Scatter(
+        x=years_all[abstained_mask],
+        y=nvs_all[abstained_mask],
+        mode="markers",
+        name="0 points, both present",
+        marker=dict(size=8, color="#d6604d", symbol="circle-open", line=dict(width=2)),
+        hovertemplate="Year %{x}<br>NVS 0<br>Both countries present<extra></extra>"
+    ))
+
+    fig.add_trace(go.Scatter(
+        x=years_all[absent_mask],
+        y=[None] * absent_mask.sum(),
+        mode="markers",
+        name="Absent",
+        marker=dict(size=9, color="#888780", symbol="x"),
+        hovertemplate="Year %{x}<br>N/A<extra></extra>"
+    ))
+
+    # 5-year rolling mean for the full series
+    present_mask = voted_mask | abstained_mask
+    years_present = years_all[present_mask]
+    nvs_present = nvs_all[present_mask]
+
+    if nvs_present.size > 0:
+        roll = pd.Series(nvs_present, index=years_present).rolling(window=5, min_periods=1).mean()
+        fig.add_trace(go.Scatter(
+            x=roll.index,
+            y=roll.values,
+            mode="lines",
+            name="5-year rolling mean",
+            line=dict(color="#0b3c6f", width=2.5),
+            hovertemplate="Year %{x}<br>Rolling NVS %{y:.2f}<extra></extra>"
+        ))
+
+        mean_v = float(np.mean(nvs_present))
+        fig.add_hline(
+            y=mean_v,
+            line_dash="dot",
+            line_color="#5ea7d8",
+            annotation_text=f"mean {mean_v:.2f}",
+            annotation_position="top right"
+        )
+
+        cp_idx, cp_score = compute_simple_change_point(nvs_present)
+        cp_year = int(years_present[cp_idx]) if cp_idx is not None else None
+        if cp_year is not None:
+            fig.add_vline(
+                x=cp_year,
+                line_width=2,
+                line_dash="dash",
+                line_color="red",
+                annotation_text=f"change ~{cp_year}",
+                annotation_position="top left"
+            )
+
+    fig.update_layout(
+        title=f"Full-year Pair Trend: {source_country} → {target_country}",
+        xaxis_title="Year",
+        yaxis_title="NVS (0–12)",
+        yaxis=dict(range=[-0.5, 13]),
+        legend=dict(orientation="h", y=-0.2),
+        height=420,
+        paper_bgcolor="white",
+        plot_bgcolor="white"
+    )
+
+    return fig
+
+
 # =============================================================================
 # DATA LOADING
 # =============================================================================
-
 @st.cache_data
 def load_data(nodes_file: str, edges_file: str):
     nodes = pd.read_csv(nodes_file)
@@ -274,7 +528,7 @@ def load_data(nodes_file: str, edges_file: str):
             edges = edges[edges["round"] == "final"]
 
     if edges.empty:
-        raise ValueError("No rows remain after applying score_type/round filters.")
+        raise ValueError("No rows remain after applying filters.")
 
     src_col = find_col(
         edges.columns,
@@ -288,21 +542,27 @@ def load_data(nodes_file: str, edges_file: str):
         ["target", "to", "recip"]
     )
 
+    # 🔥 STRONGER POINT COLUMN DETECTION
     numeric_cols = [
         c for c in edges.columns
         if pd.api.types.is_numeric_dtype(edges[c])
     ]
 
-    weight_candidates = [
-        c for c in numeric_cols
-        if any(k in c.lower() for k in ("weight", "point", "score", "pts", "value"))
-        and c.lower() != "year"
-    ]
+    pts_col = None
+    for c in numeric_cols:
+        if any(k in c.lower() for k in ["point", "score", "pts", "value", "weight"]):
+            pts_col = c
+            break
 
-    if not weight_candidates:
-        raise ValueError("No numeric points/weight column found.")
+    if pts_col is None:
+        if "weight" in edges.columns and pd.api.types.is_numeric_dtype(edges["weight"]):
+            pts_col = "weight"
+        else:
+            raise ValueError(f"No valid points column found. Available numeric: {numeric_cols}")
 
-    pts_col = weight_candidates[0]
+    # 🔥 FORCE STANDARD NAME
+    edges = edges.rename(columns={pts_col: "points"})
+    pts_col = "points"
 
     return nodes, edges, id2label, src_col, tgt_col, pts_col
 
@@ -345,27 +605,23 @@ def participation_years_for_label(label: str) -> int:
 
 @st.cache_data
 def compute_period_data(start_year: int, end_year: int):
-    """
-    Compute all core data for a selected year range.
-
-    Important:
-    This function is year-range aware. Every table derived from it only reflects
-    the selected period.
-    """
     df = edges[(edges["year"] >= start_year) & (edges["year"] <= end_year)].copy()
 
     if df.empty:
         return None
 
+    # 🔥 ENSURE points EXISTS
+    if "points" not in df.columns:
+        raise ValueError("CRITICAL: 'points' column missing after load.")
+
     years_with_data = sorted(df["year"].unique())
 
     actual = (
-        df.groupby(["year", src_col, tgt_col], as_index=False)[pts_col]
+        df.groupby(["year", src_col, tgt_col], as_index=False)["points"]
           .sum()
           .rename(columns={
               src_col: "source",
-              tgt_col: "target",
-              pts_col: "points"
+              tgt_col: "target"
           })
     )
 
@@ -376,21 +632,18 @@ def compute_period_data(start_year: int, end_year: int):
 
     for yr in years_with_data:
         yr_df = df[df["year"] == yr]
-
         participants_by_year[yr] = (
-            set(yr_df[src_col].dropna().astype(str).unique())
-            | set(yr_df[tgt_col].dropna().astype(str).unique())
+            set(yr_df[src_col].astype(str))
+            | set(yr_df[tgt_col].astype(str))
         )
 
-    pair_rows = []
-
-    for yr in years_with_data:
-        participants = sorted(participants_by_year[yr])
-
-        for s in participants:
-            for t in participants:
-                if s != t:
-                    pair_rows.append((yr, s, t))
+    pair_rows = [
+        (yr, s, t)
+        for yr in years_with_data
+        for s in participants_by_year[yr]
+        for t in participants_by_year[yr]
+        if s != t
+    ]
 
     eligible = pd.DataFrame(pair_rows, columns=["year", "source", "target"])
 
@@ -401,46 +654,23 @@ def compute_period_data(start_year: int, end_year: int):
     )
 
     yr_agg["points"] = yr_agg["points"].fillna(0)
+    yr_agg["status"] = np.where(yr_agg["points"] > 0, "voted", "abstained")
+
     yr_agg["era_max"] = yr_agg["year"].map(ERA_MAX).fillna(12)
     yr_agg["nvs_year"] = (yr_agg["points"] / yr_agg["era_max"]).clip(0, 1)
 
-    voter_years = set(zip(df["year"], df[src_col].astype(str)))
-    voted_pairs = set(zip(actual["year"], actual["source"], actual["target"]))
-
-    yr_agg["voter_participated"] = [
-        (row.year, row.source) in voter_years
-        for row in yr_agg.itertuples()
-    ]
-
-    yr_agg["gave_points"] = [
-        (row.year, row.source, row.target) in voted_pairs
-        for row in yr_agg.itertuples()
-    ]
-
-    def classify_status(row):
-        if row.gave_points:
-            return "voted"
-        if row.voter_participated:
-            return "abstained"
-        return "absent"
-
-    yr_agg["status"] = [
-        classify_status(row)
-        for row in yr_agg.itertuples()
-    ]
-
     raw_total_df = (
         actual.groupby(["source", "target"], as_index=False)["points"]
-              .sum()
-              .rename(columns={"points": "total_votes"})
+        .sum()
+        .rename(columns={"points": "total_votes"})
     )
 
     agg = (
         yr_agg.groupby(["source", "target"], as_index=False)
-              .agg(
-                  nvs_sum=("nvs_year", "sum"),
-                  years_eligible=("year", "nunique")
-              )
+        .agg(
+            nvs_sum=("nvs_year", "sum"),
+            years_eligible=("year", "nunique")
+        )
     )
 
     agg = agg.merge(raw_total_df, on=["source", "target"], how="left")
@@ -460,7 +690,6 @@ def compute_period_data(start_year: int, end_year: int):
         "agg": agg,
         "participants_by_year": participants_by_year,
     }
-
 
 def build_matrix(agg, value_col, order):
     m = agg.pivot(
@@ -1278,178 +1507,6 @@ else:
 
 
 # =============================================================================
-# PAIR ANALYSIS
-# =============================================================================
-
-st.subheader("Pair analysis")
-
-pair_col1, pair_col2 = st.columns(2)
-
-with pair_col1:
-    source_country = st.selectbox(
-        "Source country",
-        order,
-        index=0
-    )
-
-with pair_col2:
-    target_country = st.selectbox(
-        "Target country",
-        order,
-        index=min(1, len(order) - 1)
-    )
-
-pair_df = pdata["yr_agg"].copy()
-pair_df["src_label"] = pair_df["source"].map(id2label).fillna(pair_df["source"])
-pair_df["tgt_label"] = pair_df["target"].map(id2label).fillna(pair_df["target"])
-
-pair_rows = pair_df[
-    (pair_df["src_label"] == source_country)
-    & (pair_df["tgt_label"] == target_country)
-].copy()
-
-if pair_rows.empty:
-    st.warning("No eligible pair-years found for this pair.")
-else:
-    pair_rows = pair_rows.sort_values("year")
-
-    status_counts = pair_rows["status"].value_counts()
-
-    sc1, sc2, sc3 = st.columns(3)
-    sc1.metric("Years gave points", status_counts.get("voted", 0))
-    sc2.metric("Years gave 0", status_counts.get("abstained", 0))
-    sc3.metric("Years not in contest", status_counts.get("absent", 0))
-
-    years_all = pair_rows["year"].to_numpy()
-    nvs_all = pair_rows["nvs_year"].to_numpy() * 12
-    status_all = pair_rows["status"].to_numpy()
-
-    voted_mask = status_all == "voted"
-    abstained_mask = status_all == "abstained"
-    absent_mask = status_all == "absent"
-
-    present_mask = voted_mask | abstained_mask
-
-    years_present = years_all[present_mask]
-    nvs_present = nvs_all[present_mask]
-
-    if nvs_present.size > 0:
-        mean_v = float(np.mean(nvs_present))
-        std_v = float(np.std(nvs_present))
-        cv_v = float(std_v / (mean_v + 1e-6))
-        slope_v = linear_trend_slope(years_present, nvs_present)
-        stability = float(max(0.0, 1.0 - cv_v))
-
-        cp_idx, cp_score = compute_simple_change_point(nvs_present)
-        cp_year = int(years_present[cp_idx]) if cp_idx is not None else None
-    else:
-        mean_v = std_v = cv_v = slope_v = stability = 0.0
-        cp_year = None
-        cp_score = 0.0
-
-    relationship_class = classify_relationship(
-        mean_v,
-        std_v,
-        cv_v,
-        slope_v,
-        stability
-    )
-
-    m1, m2, m3, m4, m5 = st.columns(5)
-
-    m1.metric("Mean NVS", f"{mean_v:.2f}")
-    m2.metric("Std dev", f"{std_v:.2f}")
-    m3.metric("CV", f"{cv_v:.2f}")
-    m4.metric("Trend slope", f"{slope_v:.3f}")
-    m5.metric("Stability", f"{stability:.2f}")
-
-    st.success(f"Relationship classification: **{relationship_class}**")
-
-    if cp_year:
-        st.info(
-            f"Possible relationship change around **{cp_year}** "
-            f"(heuristic score {cp_score:.2f})."
-        )
-
-    roll = (
-        pd.Series(nvs_present, index=years_present)
-        .rolling(window=5, min_periods=1)
-        .mean()
-        if nvs_present.size > 0 else pd.Series(dtype=float)
-    )
-
-    fig_pair = go.Figure()
-
-    fig_pair.add_trace(go.Scatter(
-        x=years_all[voted_mask],
-        y=nvs_all[voted_mask],
-        mode="markers",
-        name="Gave points",
-        marker=dict(size=9, color="#2f7fbe", symbol="circle"),
-        hovertemplate="Year %{x}<br>NVS %{y:.2f}<br>Status: gave points<extra></extra>"
-    ))
-
-    fig_pair.add_trace(go.Scatter(
-        x=years_all[abstained_mask],
-        y=nvs_all[abstained_mask],
-        mode="markers",
-        name="0 points, both present",
-        marker=dict(size=9, color="#d6604d", symbol="circle-open", line=dict(width=2)),
-        hovertemplate="Year %{x}<br>NVS 0<br>Both countries present<extra></extra>"
-    ))
-
-    fig_pair.add_trace(go.Scatter(
-        x=years_all[absent_mask],
-        y=[None] * absent_mask.sum(),
-        mode="markers",
-        name="Absent",
-        marker=dict(size=10, color="#888780", symbol="x"),
-        hovertemplate="Year %{x}<br>N/A<extra></extra>"
-    ))
-
-    if not roll.empty:
-        fig_pair.add_trace(go.Scatter(
-            x=roll.index,
-            y=roll.values,
-            mode="lines",
-            name="5-year rolling mean",
-            line=dict(color="#0b3c6f", width=2.5),
-            hovertemplate="Year %{x}<br>Rolling NVS %{y:.2f}<extra></extra>"
-        ))
-
-        fig_pair.add_hline(
-            y=mean_v,
-            line_dash="dot",
-            line_color="#5ea7d8",
-            annotation_text=f"mean {mean_v:.2f}",
-            annotation_position="top right"
-        )
-
-    if cp_year:
-        fig_pair.add_vline(
-            x=cp_year,
-            line_width=2,
-            line_dash="dash",
-            line_color="red",
-            annotation_text=f"change ~{cp_year}",
-            annotation_position="top left"
-        )
-
-    fig_pair.update_layout(
-        title=f"Pair trend: {source_country} → {target_country}",
-        xaxis_title="Year",
-        yaxis_title="NVS (0–12)",
-        yaxis=dict(range=[-0.5, 13]),
-        legend=dict(orientation="h", y=-0.2),
-        height=520,
-        paper_bgcolor="white",
-        plot_bgcolor="white"
-    )
-
-    st.plotly_chart(fig_pair, use_container_width=True)
-
-
-# =============================================================================
 # GLOBAL BEHAVIOUR TABLE
 # =============================================================================
 
@@ -1465,6 +1522,8 @@ behaviour_df = behaviour_df[
 if behaviour_df.empty:
     st.warning("No dynamic relationship data available for the selected period and filters.")
 else:
+    st.caption("Click a row in any table below to open the pair trend analysis for that alliance.")
+
     class_filter = st.selectbox(
         "Filter relationship class",
         ["All"] + sorted(behaviour_df["Class"].unique().tolist())
@@ -1482,8 +1541,10 @@ else:
         ascending=[False, False]
     )
 
-    st.dataframe(
-        shown_behaviour.head(50).round({
+    shown_behaviour_view = shown_behaviour.head(50)
+
+    behaviour_selection = st.dataframe(
+        shown_behaviour_view.round({
             "Mean NVS": 2,
             "Std Dev": 2,
             "CV": 2,
@@ -1491,7 +1552,18 @@ else:
             "Stability": 2,
             "Total Votes": 0
         }),
+        on_select="rerun",
+        selection_mode="single-row",
+        key="behaviour_table",
         use_container_width=True
+    )
+
+    update_selected_pair_from_table(
+        behaviour_selection,
+        shown_behaviour_view,
+        "Source",
+        "Target",
+        "dynamic relationship classification"
     )
 
     col1, col2, col3 = st.columns(3)
@@ -1505,9 +1577,22 @@ else:
             ascending=[False, False]
         ).head(10)
 
-        st.dataframe(
-            stable[["Source", "Target", "Mean NVS", "Stability", "Eligible Years"]].round(2),
+        stable_view = stable[["Source", "Target", "Mean NVS", "Stability", "Eligible Years"]]
+
+        stable_selection = st.dataframe(
+            stable_view.round(2),
+            on_select="rerun",
+            selection_mode="single-row",
+            key="stable_alliances_table",
             use_container_width=True
+        )
+
+        update_selected_pair_from_table(
+            stable_selection,
+            stable_view,
+            "Source",
+            "Target",
+            "top stable alliances"
         )
 
     with col2:
@@ -1516,9 +1601,22 @@ else:
             behaviour_df["Class"] == "Emerging relationship"
         ].sort_values("Trend Slope", ascending=False).head(10)
 
-        st.dataframe(
-            emerging[["Source", "Target", "Mean NVS", "Trend Slope", "Eligible Years"]].round(2),
+        emerging_view = emerging[["Source", "Target", "Mean NVS", "Trend Slope", "Eligible Years"]]
+
+        emerging_selection = st.dataframe(
+            emerging_view.round(2),
+            on_select="rerun",
+            selection_mode="single-row",
+            key="emerging_alliances_table",
             use_container_width=True
+        )
+
+        update_selected_pair_from_table(
+            emerging_selection,
+            emerging_view,
+            "Source",
+            "Target",
+            "top emerging relationships"
         )
 
     with col3:
@@ -1527,9 +1625,22 @@ else:
             behaviour_df["Class"] == "Declining relationship"
         ].sort_values("Trend Slope", ascending=True).head(10)
 
-        st.dataframe(
-            declining[["Source", "Target", "Mean NVS", "Trend Slope", "Eligible Years"]].round(2),
+        declining_view = declining[["Source", "Target", "Mean NVS", "Trend Slope", "Eligible Years"]]
+
+        declining_selection = st.dataframe(
+            declining_view.round(2),
+            on_select="rerun",
+            selection_mode="single-row",
+            key="declining_alliances_table",
             use_container_width=True
+        )
+
+        update_selected_pair_from_table(
+            declining_selection,
+            declining_view,
+            "Source",
+            "Target",
+            "top declining relationships"
         )
 
 
@@ -1561,10 +1672,183 @@ top_pairs = (
     })
 )
 
-st.dataframe(
+top_pairs_selection = st.dataframe(
     top_pairs.round({
         "NVS (0–12)": 2,
         "Avg/year": 2
     }),
+    on_select="rerun",
+    selection_mode="single-row",
+    key="top_pairs_table",
     use_container_width=True
 )
+
+update_selected_pair_from_table(
+    top_pairs_selection,
+    top_pairs,
+    "Voter",
+    "Recipient",
+    "top directed pairs"
+)
+
+
+# =============================================================================
+# PAIR TREND ANALYSIS
+# =============================================================================
+
+st.subheader("Pair trend analysis")
+
+requested_open = bool(st.session_state.pop("pair_trend_requested", False))
+
+if "show_pair_trend" not in st.session_state:
+    st.session_state["show_pair_trend"] = requested_open
+elif requested_open:
+    st.session_state["show_pair_trend"] = True
+
+show_pair_trend = st.toggle(
+    "Show pair trend analysis",
+    key="show_pair_trend",
+    help="Click a row in one of the alliance tables above to switch this on automatically."
+)
+
+if show_pair_trend:
+    selected_source = st.session_state.get("selected_pair_source")
+    selected_target = st.session_state.get("selected_pair_target")
+
+    if selected_source not in order:
+        selected_source = order[0]
+
+    if selected_target not in order:
+        selected_target = order[min(1, len(order) - 1)]
+
+    pair_col1, pair_col2 = st.columns(2)
+
+    with pair_col1:
+        source_country = st.selectbox(
+            "Source country",
+            order,
+            index=order.index(selected_source)
+        )
+
+    with pair_col2:
+        target_country = st.selectbox(
+            "Target country",
+            order,
+            index=order.index(selected_target)
+        )
+
+    pair_df = pdata["yr_agg"].copy()
+    pair_df["src_label"] = pair_df["source"].map(id2label).fillna(pair_df["source"])
+    pair_df["tgt_label"] = pair_df["target"].map(id2label).fillna(pair_df["target"])
+
+    pair_rows = pair_df[
+        (pair_df["src_label"] == source_country)
+        & (pair_df["tgt_label"] == target_country)
+    ].copy()
+
+    if pair_rows.empty:
+        st.warning("No eligible pair-years found for this pair.")
+    else:
+        pair_rows = pair_rows.sort_values("year")
+
+        status_counts = pair_rows["status"].value_counts()
+
+        sc1, sc2, sc3 = st.columns(3)
+        sc1.metric("Years gave points", status_counts.get("voted", 0))
+        sc2.metric("Years gave 0", status_counts.get("abstained", 0))
+        sc3.metric("Years not in contest", status_counts.get("absent", 0))
+
+        years_all = pair_rows["year"].to_numpy()
+        nvs_all = pair_rows["nvs_year"].to_numpy() * 12
+        status_all = pair_rows["status"].to_numpy()
+
+        voted_mask = status_all == "voted"
+        abstained_mask = status_all == "abstained"
+        absent_mask = status_all == "absent"
+
+        present_mask = voted_mask | abstained_mask
+
+        years_present = years_all[present_mask]
+        nvs_present = nvs_all[present_mask]
+
+        if nvs_present.size > 0:
+            mean_v = float(np.mean(nvs_present))
+            std_v = float(np.std(nvs_present))
+            cv_v = float(std_v / (mean_v + 1e-6))
+            slope_v = linear_trend_slope(years_present, nvs_present)
+            stability = float(max(0.0, 1.0 - cv_v))
+
+            cp_idx, cp_score = compute_simple_change_point(nvs_present)
+            cp_year = int(years_present[cp_idx]) if cp_idx is not None else None
+        else:
+            mean_v = std_v = cv_v = slope_v = stability = 0.0
+            cp_year = None
+            cp_score = 0.0
+
+        relationship_class = classify_relationship(
+            mean_v,
+            std_v,
+            cv_v,
+            slope_v,
+            stability
+        )
+
+        m1, m2, m3, m4, m5 = st.columns(5)
+
+        m1.metric("Mean NVS", f"{mean_v:.2f}")
+        m2.metric("Std dev", f"{std_v:.2f}")
+        m3.metric("CV", f"{cv_v:.2f}")
+        m4.metric("Trend slope", f"{slope_v:.3f}")
+        m5.metric("Stability", f"{stability:.2f}")
+
+        st.success(f"Relationship classification: **{relationship_class}**")
+
+        if cp_year:
+            st.info(
+                f"Possible relationship change around **{cp_year}** "
+                f"(heuristic score {cp_score:.2f})."
+            )
+
+        # full-year chart (all years)
+        fig_full = build_full_pair_figure(
+            pair_rows,
+            source_country,
+            target_country,
+        )
+
+        st.caption("Full series across all years")
+        st.plotly_chart(fig_full, use_container_width=True)
+
+        # 5-year segmented chart below
+        fig_pair = build_pair_interval_figure(
+            pair_rows,
+            source_country,
+            target_country,
+            start_year,
+            end_year,
+            interval_years=5,
+        )
+
+        st.caption("Each colored segment is a 5-year interval. The table below classifies each interval separately.")
+        st.plotly_chart(fig_pair, use_container_width=True)
+
+        interval_summary = build_pair_interval_summary(
+            pair_rows,
+            start_year,
+            end_year,
+            interval_years=5,
+        )
+
+        if interval_summary.empty:
+            st.info("No 5-year interval summary available for this pair.")
+        else:
+            st.dataframe(
+                interval_summary.round({
+                    "Mean NVS": 2,
+                    "Std Dev": 2,
+                    "Trend Slope": 3,
+                    "Stability": 2,
+                }),
+                use_container_width=True,
+                hide_index=True,
+            )
