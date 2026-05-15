@@ -409,7 +409,7 @@ def build_pair_interval_figure(
     return fig_pair
 
 
-def build_full_pair_figure(pair_rows: pd.DataFrame, source_country: str, target_country: str):
+def build_full_pair_figure(pair_rows: pd.DataFrame, source_country: str, target_country: str, highlight_abstained_years: list | None = None):
     years_all = pair_rows["year"].to_numpy()
     nvs_all = pair_rows["nvs_year"].to_numpy() * 12
     status_all = pair_rows["status"].to_numpy()
@@ -446,6 +446,19 @@ def build_full_pair_figure(pair_rows: pd.DataFrame, source_country: str, target_
         marker=dict(size=9, color="#888780", symbol="x"),
         hovertemplate="Year %{x}<br>N/A<extra></extra>"
     ))
+
+    # Highlight specific abstained years (e.g., recipient qualified but sender gave 0)
+    if highlight_abstained_years:
+        ha = np.isin(years_all, np.array(highlight_abstained_years)) & abstained_mask
+        if ha.any():
+            fig.add_trace(go.Scatter(
+                x=years_all[ha],
+                y=nvs_all[ha],
+                mode="markers",
+                name="Qualified but received 0",
+                marker=dict(size=11, color="#ff3333", symbol="diamond"),
+                hovertemplate="Year %{x}<br>NVS 0<br>Recipient qualified but received 0 points<extra></extra>",
+            ))
 
     # 5-year rolling mean for the full series
     present_mask = voted_mask | abstained_mask
@@ -1884,7 +1897,6 @@ else:
             key="declining_alliances_table",
             use_container_width=True
         )
-
         update_selected_pair_from_table(
             declining_selection,
             declining_view,
@@ -2003,10 +2015,24 @@ if show_pair_trend:
 
         status_counts = pair_rows["status"].value_counts()
 
+        # compute years where recipient or sender were not present in the final
+        participants_by_year = pdata.get("participants_by_year", {})
+        label2id = {v: k for k, v in id2label.items()}
+        target_id = label2id.get(target_country, target_country)
+        source_id = label2id.get(source_country, source_country)
+
+        years_range = [yr for yr in pdata.get("years", []) if yr >= start_year and yr <= end_year]
+
+        recipient_nonfinal_years = [yr for yr in years_range if str(target_id) not in participants_by_year.get(yr, set())]
+        sender_absent_years = [yr for yr in years_range if str(source_id) not in participants_by_year.get(yr, set())]
+
+        # years where recipient qualified but sender gave 0
+        highlight_abstained_years = pair_rows.loc[pair_rows["status"] == "abstained", "year"].tolist()
+
         sc1, sc2, sc3 = st.columns(3)
         sc1.metric("Years gave points", status_counts.get("voted", 0))
         sc2.metric("Years gave 0", status_counts.get("abstained", 0))
-        sc3.metric("Years not in contest", status_counts.get("absent", 0))
+        sc3.metric("Years sender absent", len(sender_absent_years))
 
         years_all = pair_rows["year"].to_numpy()
         nvs_all = pair_rows["nvs_year"].to_numpy() * 12
@@ -2059,15 +2085,28 @@ if show_pair_trend:
                 f"(heuristic score {cp_score:.2f})."
             )
 
+
         # full-year chart (all years)
         fig_full = build_full_pair_figure(
             pair_rows,
             source_country,
             target_country,
+            highlight_abstained_years=highlight_abstained_years,
         )
 
         st.caption("Full series across all years")
         st.plotly_chart(fig_full, use_container_width=True)
+
+        # Notes about recipient and sender participation
+        if recipient_nonfinal_years:
+            st.info(
+                f"Recipient did not qualify for the final in: {', '.join(str(y) for y in recipient_nonfinal_years)}"
+            )
+
+        if sender_absent_years:
+            st.info(
+                f"Sender was not present in: {', '.join(str(y) for y in sender_absent_years)}"
+            )
 
         # 5-year segmented chart below
         fig_pair = build_pair_interval_figure(
