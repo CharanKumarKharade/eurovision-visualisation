@@ -318,12 +318,70 @@ def build_pair_interval_summary(pair_rows: pd.DataFrame, start_year: int, end_ye
     return pd.DataFrame(rows)
 
 
+def build_final_standings(actual: pd.DataFrame, participants_by_year: dict) -> pd.DataFrame:
+    """
+    Build yearly final-round standings from the vote totals already present in the dataset.
+
+    The standings are based on points received in the final for each year and country.
+    """
+    if actual.empty:
+        return pd.DataFrame(columns=["year", "country_id", "country_label", "final_points", "final_place", "is_winner"])
+
+    target_points = (
+        actual.groupby(["year", "target"], as_index=False)["points"]
+        .sum()
+        .rename(columns={"target": "country_id", "points": "final_points"})
+    )
+
+    rows = []
+
+    for year, participants in participants_by_year.items():
+        country_ids = sorted({str(c) for c in participants})
+
+        if not country_ids:
+            continue
+
+        year_targets = target_points[target_points["year"] == year].set_index("country_id")
+
+        year_rows = pd.DataFrame({"country_id": country_ids})
+        year_rows["year"] = int(year)
+        year_rows["final_points"] = year_rows["country_id"].map(year_targets["final_points"]).fillna(0)
+        year_rows["final_place"] = year_rows["final_points"].rank(method="min", ascending=False).astype(int)
+        year_rows["is_winner"] = year_rows["final_place"] == 1
+        year_rows["country_label"] = year_rows["country_id"].map(id2label).fillna(year_rows["country_id"])
+
+        rows.append(year_rows)
+
+    if not rows:
+        return pd.DataFrame(columns=["year", "country_id", "country_label", "final_points", "final_place", "is_winner"])
+
+    standings = pd.concat(rows, ignore_index=True)
+    return standings[["year", "country_id", "country_label", "final_points", "final_place", "is_winner"]]
+
+
+def build_standing_lookup(final_standings: pd.DataFrame) -> dict:
+    lookup = {}
+
+    if final_standings.empty:
+        return lookup
+
+    for _, row in final_standings.iterrows():
+        lookup[(int(row["year"]), str(row["country_label"]))] = {
+            "final_points": float(row["final_points"]),
+            "final_place": int(row["final_place"]),
+            "is_winner": bool(row["is_winner"]),
+        }
+
+    return lookup
+
+
 def build_pair_interval_figure(
     pair_rows: pd.DataFrame,
     source_country: str,
     target_country: str,
     start_year: int,
     end_year: int,
+    standing_lookup: dict | None = None,
     interval_years: int = 5,
 ):
     fig_pair = go.Figure()
@@ -356,6 +414,25 @@ def build_pair_interval_figure(
         color = palette[segment_count % len(palette)]
         segment_count += 1
 
+        hover_lines = []
+
+        for _, row in interval_df.iterrows():
+            target_meta = standing_lookup.get((int(row["year"]), target_country), {}) if standing_lookup else {}
+            source_meta = standing_lookup.get((int(row["year"]), source_country), {}) if standing_lookup else {}
+            target_place = target_meta.get("final_place")
+            source_place = source_meta.get("final_place")
+            winner_country = source_country if source_meta.get("is_winner") else target_country if target_meta.get("is_winner") else None
+
+            hover_lines.append(
+                f"Year {int(row['year'])}<br>"
+                f"NVS {float(row['nvs_year']) * 12:.2f}<br>"
+                f"Status: {'gave points' if row['status'] == 'voted' else '0 points'}<br>"
+                f"Source final place: #{int(source_place) if pd.notna(source_place) else 'N/A'}<br>"
+                f"Target final place: #{int(target_place) if pd.notna(target_place) else 'N/A'}"
+                + (f"<br><b>Winner of the year: {winner_country}</b>" if winner_country else "")
+                + "<extra></extra>"
+            )
+
         fig_pair.add_trace(go.Scatter(
             x=interval_df["year"],
             y=interval_df["nvs_year"] * 12,
@@ -363,11 +440,8 @@ def build_pair_interval_figure(
             name=f"{interval_start}–{interval_end}",
             line=dict(color=color, width=3),
             marker=dict(color=color, size=8),
-            hovertemplate=(
-                "Year %{x}<br>"
-                "NVS %{y:.2f}<br>"
-                f"Interval: {interval_start}–{interval_end}<extra></extra>"
-            ),
+            hovertext=hover_lines,
+            hovertemplate="%{hovertext}",
         ))
 
     if not pair_rows.empty:
@@ -409,33 +483,115 @@ def build_pair_interval_figure(
     return fig_pair
 
 
-def build_full_pair_figure(pair_rows: pd.DataFrame, source_country: str, target_country: str, highlight_abstained_years: list | None = None):
+def build_full_pair_figure(
+    pair_rows: pd.DataFrame,
+    source_country: str,
+    target_country: str,
+    standing_lookup: dict | None = None,
+    highlight_abstained_years: list | None = None,
+):
     years_all = pair_rows["year"].to_numpy()
     nvs_all = pair_rows["nvs_year"].to_numpy() * 12
     status_all = pair_rows["status"].to_numpy()
+
+    target_places = np.array([
+        standing_lookup.get((int(year), target_country), {}).get("final_place")
+        for year in years_all
+    ], dtype=object) if standing_lookup else np.array([None] * len(years_all), dtype=object)
+
+    source_places = np.array([
+        standing_lookup.get((int(year), source_country), {}).get("final_place")
+        for year in years_all
+    ], dtype=object) if standing_lookup else np.array([None] * len(years_all), dtype=object)
+
+    source_winner_mask = np.array([
+        bool(standing_lookup.get((int(year), source_country), {}).get("is_winner"))
+        for year in years_all
+    ]) if standing_lookup else np.zeros(len(years_all), dtype=bool)
+
+    target_winner_mask = np.array([
+        bool(standing_lookup.get((int(year), target_country), {}).get("is_winner"))
+        for year in years_all
+    ]) if standing_lookup else np.zeros(len(years_all), dtype=bool)
+
+    winner_mask = source_winner_mask | target_winner_mask
+
+    winner_country = np.array([
+        source_country if source_is_winner else target_country if target_is_winner else None
+        for source_is_winner, target_is_winner in zip(source_winner_mask, target_winner_mask)
+    ], dtype=object)
 
     voted_mask = status_all == "voted"
     abstained_mask = status_all == "abstained"
     absent_mask = status_all == "absent"
 
+    voted_nonwinner_mask = voted_mask & ~winner_mask
+    voted_winner_mask = voted_mask & winner_mask
+    abstained_nonwinner_mask = abstained_mask & ~winner_mask
+    abstained_winner_mask = abstained_mask & winner_mask
+
+    def _hover_rows(mask, status_label):
+        rows = []
+
+        for year, value, src_place, tgt_place, winner_name in zip(
+            years_all[mask],
+            nvs_all[mask],
+            source_places[mask],
+            target_places[mask],
+            winner_country[mask],
+        ):
+            rows.append(
+                f"Year {int(year)}<br>"
+                f"NVS {float(value):.2f}<br>"
+                f"Status: {status_label}<br>"
+                f"Source final place: #{int(src_place) if pd.notna(src_place) else 'N/A'}<br>"
+                f"Target final place: #{int(tgt_place) if pd.notna(tgt_place) else 'N/A'}"
+                + (f"<br><b>Winner of the year: {winner_name}</b>" if winner_name else "")
+                + "<extra></extra>"
+            )
+
+        return rows
+
     fig = go.Figure()
 
     fig.add_trace(go.Scatter(
-        x=years_all[voted_mask],
-        y=nvs_all[voted_mask],
+        x=years_all[voted_nonwinner_mask],
+        y=nvs_all[voted_nonwinner_mask],
         mode="markers",
         name="Gave points",
         marker=dict(size=8, color="#2f7fbe", symbol="circle"),
-        hovertemplate="Year %{x}<br>NVS %{y:.2f}<br>Status: gave points<extra></extra>"
+        hovertext=_hover_rows(voted_nonwinner_mask, "gave points"),
+        hovertemplate="%{hovertext}",
     ))
 
     fig.add_trace(go.Scatter(
-        x=years_all[abstained_mask],
-        y=nvs_all[abstained_mask],
+        x=years_all[voted_winner_mask],
+        y=nvs_all[voted_winner_mask],
+        mode="markers",
+        name="Winner year",
+        marker=dict(size=12, color="#f59e0b", symbol="star", line=dict(width=1.5, color="#ffffff")),
+        hovertext=_hover_rows(voted_winner_mask, "gave points"),
+        hovertemplate="%{hovertext}",
+    ))
+
+    fig.add_trace(go.Scatter(
+        x=years_all[abstained_nonwinner_mask],
+        y=nvs_all[abstained_nonwinner_mask],
         mode="markers",
         name="0 points, both present",
         marker=dict(size=8, color="#d6604d", symbol="circle-open", line=dict(width=2)),
-        hovertemplate="Year %{x}<br>NVS 0<br>Both countries present<extra></extra>"
+        hovertext=_hover_rows(abstained_nonwinner_mask, "0 points"),
+        hovertemplate="%{hovertext}",
+    ))
+
+    fig.add_trace(go.Scatter(
+        x=years_all[abstained_winner_mask],
+        y=nvs_all[abstained_winner_mask],
+        mode="markers",
+        name="Winner year, 0 points",
+        marker=dict(size=12, color="#f59e0b", symbol="star-open", line=dict(width=1.5, color="#ffffff")),
+        hovertext=_hover_rows(abstained_winner_mask, "0 points"),
+        hovertemplate="%{hovertext}",
     ))
 
     fig.add_trace(go.Scatter(
@@ -703,6 +859,7 @@ def compute_period_data(start_year: int, end_year: int):
         "yr_agg": yr_agg,
         "agg": agg,
         "participants_by_year": participants_by_year,
+        "final_standings": build_final_standings(actual, participants_by_year),
     }
 
 def build_matrix(agg, value_col, order):
@@ -2002,6 +2159,7 @@ if show_pair_trend:
     pair_df = pdata["yr_agg"].copy()
     pair_df["src_label"] = pair_df["source"].map(id2label).fillna(pair_df["source"])
     pair_df["tgt_label"] = pair_df["target"].map(id2label).fillna(pair_df["target"])
+    final_standing_lookup = build_standing_lookup(pdata.get("final_standings", pd.DataFrame()))
 
     pair_rows = pair_df[
         (pair_df["src_label"] == source_country)
@@ -2091,6 +2249,7 @@ if show_pair_trend:
             pair_rows,
             source_country,
             target_country,
+            standing_lookup=final_standing_lookup,
             highlight_abstained_years=highlight_abstained_years,
         )
 
@@ -2115,6 +2274,7 @@ if show_pair_trend:
             target_country,
             start_year,
             end_year,
+            standing_lookup=final_standing_lookup,
             interval_years=5,
         )
 
