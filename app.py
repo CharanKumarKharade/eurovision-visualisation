@@ -1026,6 +1026,55 @@ def detect_communities_from_nvs(matrix_df, min_edge_weight=1.0):
     return pd.DataFrame(rows), G
 
 
+def build_community_color_map(communities_df):
+    """
+    Build a stable, high-contrast categorical palette for detected communities.
+    The same mapping is reused by the network graph and the world map.
+    """
+    if communities_df is None or communities_df.empty or "Community" not in communities_df.columns:
+        return {}
+
+    palette = [
+        "#1f4e79",  # deep blue
+        "#d1495b",  # red
+        "#2a9d8f",  # teal
+        "#f4a261",  # orange
+        "#6a4c93",  # purple
+        "#7f5539",  # brown
+        "#577590",  # slate blue
+        "#4d908e",  # muted cyan
+        "#b56576",  # rose
+        "#3a86ff",  # bright blue
+        "#8338ec",  # violet
+        "#fb5607",  # orange-red
+        "#2b9348",  # green
+        "#9b5de5",  # light purple
+        "#e63946",  # strong red
+        "#8ac926",  # lime
+    ]
+
+    community_names = communities_df["Community"].dropna().astype(str).tolist()
+    return {
+        community: palette[idx % len(palette)]
+        for idx, community in enumerate(community_names)
+    }
+
+
+def _find_geo_columns(nodes_df):
+    """
+    Resolve coordinate column names from common variants.
+    """
+    if nodes_df is None or nodes_df.empty:
+        return None, None
+
+    columns = {str(c).lower(): c for c in nodes_df.columns}
+
+    lat_col = columns.get("lat") or columns.get("latitude") or columns.get("y")
+    lon_col = columns.get("lon") or columns.get("long") or columns.get("longitude") or columns.get("x")
+
+    return lat_col, lon_col
+
+
 def make_community_network_figure(G, communities_df):
     if G is None or G.number_of_nodes() == 0:
         return None
@@ -1039,8 +1088,7 @@ def make_community_network_figure(G, communities_df):
         for m in members:
             community_lookup[m] = row["Community"]
 
-    community_names = sorted(communities_df["Community"].unique().tolist())
-    community_to_num = {c: i for i, c in enumerate(community_names)}
+    community_colors = build_community_color_map(communities_df)
 
     edge_x = []
     edge_y = []
@@ -1073,7 +1121,7 @@ def make_community_network_figure(G, communities_df):
         node_x.append(x)
         node_y.append(y)
         node_text.append(f"{node}<br>Community: {comm}")
-        node_color.append(community_to_num.get(comm, 0))
+        node_color.append(community_colors.get(comm, "#64748b"))
 
     node_trace = go.Scatter(
         x=node_x,
@@ -1086,7 +1134,6 @@ def make_community_network_figure(G, communities_df):
         marker=dict(
             size=13,
             color=node_color,
-            colorscale="Turbo",
             line=dict(width=1, color="#ffffff")
         ),
         name="Countries"
@@ -1103,6 +1150,271 @@ def make_community_network_figure(G, communities_df):
         margin=dict(l=20, r=20, t=80, b=20),
         xaxis=dict(showgrid=False, zeroline=False, visible=False),
         yaxis=dict(showgrid=False, zeroline=False, visible=False)
+    )
+
+    return fig
+
+
+def make_community_world_map_figure(nodes_df, communities_df):
+    if nodes_df is None or nodes_df.empty or communities_df is None or communities_df.empty:
+        return None
+
+    lat_col, lon_col = _find_geo_columns(nodes_df)
+    if not lat_col or not lon_col or "label" not in nodes_df.columns:
+        return None
+
+    community_lookup = {}
+
+    for _, row in communities_df.iterrows():
+        members = [m.strip() for m in str(row["Members"]).split(",") if m.strip()]
+        for member in members:
+            community_lookup[member] = str(row["Community"])
+
+    plot_df = nodes_df.copy()
+    plot_df["community"] = plot_df["label"].astype(str).map(community_lookup)
+    plot_df = plot_df.dropna(subset=["community"])
+
+    if plot_df.empty:
+        return None
+
+    communities = communities_df["Community"].dropna().astype(str).tolist()
+    community_colors = build_community_color_map(communities_df)
+
+    fig = go.Figure()
+
+    for community in communities:
+        sub = plot_df[plot_df["community"] == community].sort_values("label")
+
+        if sub.empty:
+            continue
+
+        fig.add_trace(go.Scattergeo(
+            lon=sub[lon_col],
+            lat=sub[lat_col],
+            text=sub["label"].astype(str),
+            mode="markers",
+            name=community,
+            marker=dict(
+                size=12,
+                color=community_colors.get(community, "#64748b"),
+                opacity=0.92,
+                line=dict(width=1.2, color="rgba(255,255,255,0.95)")
+            ),
+            hovertemplate="<b>%{text}</b><br>Community: " + community + "<extra></extra>",
+        ))
+
+    fig.update_geos(
+        projection_type="natural earth",
+        showland=True,
+        landcolor="#f4f6f9",
+        showocean=True,
+        oceancolor="#fbfcfe",
+        showcountries=True,
+        countrycolor="#c5cfdb",
+        showcoastlines=True,
+        coastlinecolor="#b3bcc8",
+        showframe=False,
+    )
+
+    fig.update_layout(
+        title="Detected voting blocs / communities on the world map",
+        height=650,
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        margin=dict(l=10, r=10, t=70, b=10),
+        legend=dict(orientation="h", y=-0.05),
+    )
+
+    return fig
+
+
+def make_directed_community_flow_map_figure(
+    nodes_df,
+    community_graph,
+    community_name,
+    community_color,
+    max_flows: int = 20,
+):
+    """
+    Plot a directed flow map for a single community.
+
+    For readability, this shows the strongest outgoing edge per source country
+    within the selected community, so the direction of flow is visible without
+    overloading the map.
+    """
+    if (
+        nodes_df is None or nodes_df.empty
+        or community_graph is None
+        or community_graph.number_of_nodes() == 0
+    ):
+        return None
+
+    lat_col, lon_col = _find_geo_columns(nodes_df)
+    if not lat_col or not lon_col or "label" not in nodes_df.columns:
+        return None
+
+    coords_df = nodes_df.copy()
+    coords_df["label"] = coords_df["label"].astype(str)
+    coords_df = coords_df.dropna(subset=[lat_col, lon_col, "label"])
+
+    if coords_df.empty:
+        return None
+
+    coord_lookup = {
+        row["label"]: (float(row[lat_col]), float(row[lon_col]))
+        for _, row in coords_df.iterrows()
+    }
+
+    base_nodes = []
+    for node in community_graph.nodes():
+        if node in coord_lookup:
+            lat, lon = coord_lookup[node]
+            base_nodes.append((node, lat, lon))
+
+    if not base_nodes:
+        return None
+
+    flow_edges = []
+
+    for source in community_graph.nodes():
+        source_edges = list(community_graph.out_edges(source, data=True))
+        if not source_edges:
+            continue
+
+        best_edge = max(
+            source_edges,
+            key=lambda e: float(e[2].get("display_weight", e[2].get("weight", 0.0)))
+        )
+
+        _, target, data = best_edge
+        if source not in coord_lookup or target not in coord_lookup:
+            continue
+
+        s_lat, s_lon = coord_lookup[source]
+        t_lat, t_lon = coord_lookup[target]
+        weight = float(data.get("display_weight", data.get("weight", 0.0)))
+
+        flow_edges.append({
+            "source": source,
+            "target": target,
+            "weight": weight,
+            "line_lon": [s_lon, t_lon],
+            "line_lat": [s_lat, t_lat],
+            "mid_lon": (s_lon + t_lon) / 2,
+            "mid_lat": (s_lat + t_lat) / 2,
+        })
+
+    if not flow_edges:
+        return None
+
+    flow_edges = sorted(flow_edges, key=lambda d: d["weight"], reverse=True)[:max_flows]
+    max_weight = max((edge["weight"] for edge in flow_edges), default=1.0)
+    if max_weight <= 0:
+        max_weight = 1.0
+
+    fig = go.Figure()
+
+    # Base community nodes.
+    fig.add_trace(go.Scattergeo(
+        lon=[lon for _, _, lon in base_nodes],
+        lat=[lat for _, lat, _ in base_nodes],
+        text=[node for node, _, _ in base_nodes],
+        mode="markers+text",
+        textposition="top center",
+        name=f"{community_name} countries",
+        marker=dict(
+            size=11,
+            color=community_color,
+            opacity=0.92,
+            line=dict(width=1.2, color="rgba(255,255,255,0.95)")
+        ),
+        hovertemplate="<b>%{text}</b><br>Community: " + community_name + "<extra></extra>",
+        showlegend=False,
+    ))
+
+    # Directed flows: one line per strongest source->target connection.
+    source_lons = []
+    source_lats = []
+    source_text = []
+    target_lons = []
+    target_lats = []
+    target_text = []
+
+    for edge in flow_edges:
+        norm_weight = edge["weight"] / max_weight
+        line_width = 1.5 + (3.0 * norm_weight)
+        line_opacity = 0.35 + (0.45 * norm_weight)
+
+        fig.add_trace(go.Scattergeo(
+            lon=edge["line_lon"],
+            lat=edge["line_lat"],
+            mode="lines",
+            line=dict(color=community_color, width=line_width),
+            opacity=line_opacity,
+            hoverinfo="skip",
+            showlegend=False,
+        ))
+
+        source_lons.append(edge["line_lon"][0])
+        source_lats.append(edge["line_lat"][0])
+        source_text.append(f"<b>{edge['source']}</b> (source)<br>→ <b>{edge['target']}</b>")
+
+        target_lons.append(edge["line_lon"][1])
+        target_lats.append(edge["line_lat"][1])
+        target_text.append(f"<b>{edge['target']}</b> (target)<br>from <b>{edge['source']}</b>")
+
+    if source_lons:
+        fig.add_trace(go.Scattergeo(
+            lon=source_lons,
+            lat=source_lats,
+            mode="markers",
+            marker=dict(
+                size=7,
+                color=community_color,
+                symbol="circle",
+                line=dict(width=1, color="white"),
+            ),
+            hovertext=source_text,
+            hovertemplate="%{hovertext}<br>Direction: source<extra></extra>",
+            showlegend=False,
+        ))
+
+    if target_lons:
+        fig.add_trace(go.Scattergeo(
+            lon=target_lons,
+            lat=target_lats,
+            mode="markers",
+            marker=dict(
+                size=10,
+                color=community_color,
+                symbol="triangle-right",
+                line=dict(width=1.2, color="white"),
+            ),
+            hovertext=target_text,
+            hovertemplate="%{hovertext}<br>Direction: target<extra></extra>",
+            showlegend=False,
+        ))
+
+    fig.update_geos(
+        projection_type="natural earth",
+        showland=True,
+        landcolor="#f4f6f9",
+        showocean=True,
+        oceancolor="#fbfcfe",
+        showcountries=True,
+        countrycolor="#c5cfdb",
+        showcoastlines=True,
+        coastlinecolor="#b3bcc8",
+        showframe=False,
+    )
+
+    fig.update_layout(
+        title=f"{community_name} directed flow map",
+        height=620,
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        margin=dict(l=10, r=10, t=70, b=10),
+        showlegend=False,
     )
 
     return fig
@@ -1846,6 +2158,8 @@ else:
     if communities_df.empty:
         st.warning("No communities detected. Try lowering the minimum mutual NVS edge threshold.")
     else:
+        community_colors = build_community_color_map(communities_df)
+
         st.dataframe(
             communities_df.round({"Average Internal Weight": 2}),
             use_container_width=True
@@ -1858,6 +2172,18 @@ else:
 
         if fig_community is not None:
             st.plotly_chart(fig_community, use_container_width=True)
+
+        fig_community_map = make_community_world_map_figure(
+            nodes,
+            communities_df,
+        )
+
+        if fig_community_map is not None:
+            st.markdown("### Community world map")
+            st.caption("The same communities projected onto the countries' geographic locations.")
+            st.plotly_chart(fig_community_map, use_container_width=True)
+        else:
+            st.info("World map view is unavailable because geographic coordinates were not found for the detected communities.")
 
         st.markdown("---")
         st.markdown("### Directed voting network inside each community")
@@ -1922,6 +2248,21 @@ else:
                     st.plotly_chart(fig_directed, use_container_width=True)
                 else:
                     st.info(f"No directed edges meet the current threshold inside {community_name}.")
+
+                fig_flow_map = make_directed_community_flow_map_figure(
+                    nodes,
+                    community_subgraph,
+                    community_name,
+                    community_colors.get(community_name, "#64748b"),
+                    max_flows=20,
+                )
+
+                if fig_flow_map is not None:
+                    st.markdown(f"##### {community_name} flow map")
+                    st.caption("Arrows show the strongest directed flow from each country inside the community.")
+                    st.plotly_chart(fig_flow_map, use_container_width=True)
+                else:
+                    st.info(f"No flow-map view available for {community_name} with the current filters.")
         else:
             st.info("No edges meet the current threshold. Try lowering the edge threshold.")
 
