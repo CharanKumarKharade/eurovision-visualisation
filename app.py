@@ -22,7 +22,17 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.colors import sample_colorscale, sequential
 import streamlit as st
-import matplotlib.cm as cm
+
+try:
+    from matplotlib import colormaps as mpl_colormaps
+
+    def get_matplotlib_cmap(name):
+        return mpl_colormaps.get_cmap(name)
+except Exception:
+    import matplotlib.cm as cm
+
+    def get_matplotlib_cmap(name):
+        return cm.get_cmap(name)
 
 try:
     import networkx as nx
@@ -1965,7 +1975,7 @@ def make_directed_network_figure(G, communities_df, show_labels=True, min_node_s
     arrow_annotations = []
     
     # Color palette: cool to hot based on intensity
-    cmap = cm.get_cmap('YlOrRd')  # Yellow → Orange → Red gradient
+    cmap = get_matplotlib_cmap('YlOrRd')  # Yellow → Orange → Red gradient
     
     for u, v, data in G.edges(data=True):
         x0, y0 = pos[u]
