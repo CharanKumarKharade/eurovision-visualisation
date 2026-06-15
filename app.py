@@ -20,6 +20,7 @@ import math
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.colors import sample_colorscale, sequential
 import streamlit as st
 import matplotlib.cm as cm
 
@@ -1228,6 +1229,175 @@ def make_community_world_map_figure(nodes_df, communities_df):
     return fig
 
 
+def build_top_voters_for_country(period_data, target_country: str, top_n: int = 3):
+    if period_data is None or not target_country:
+        return pd.DataFrame()
+
+    agg = period_data.get("agg", pd.DataFrame()).copy()
+    if agg.empty or "tgt_label" not in agg.columns:
+        return pd.DataFrame()
+
+    target_rows = agg[agg["tgt_label"] == target_country].copy()
+    if target_rows.empty:
+        return pd.DataFrame()
+
+    top_voters = (
+        target_rows
+        .sort_values(["nvs_score", "total_votes"], ascending=[False, False])
+        .head(top_n)
+        [["src_label", "tgt_label", "nvs_score", "total_votes", "years_eligible", "raw_avg_per_year"]]
+        .rename(columns={
+            "src_label": "Voter",
+            "tgt_label": "Recipient",
+            "nvs_score": "NVS (0–12)",
+            "total_votes": "Total votes",
+            "years_eligible": "Eligible years",
+            "raw_avg_per_year": "Avg/year",
+        })
+        .reset_index(drop=True)
+    )
+
+    return top_voters
+
+
+def make_directed_country_world_map_figure(nodes_df, target_country: str, top_voters_df):
+    if nodes_df is None or nodes_df.empty or top_voters_df is None or top_voters_df.empty:
+        return None
+
+    lat_col, lon_col = _find_geo_columns(nodes_df)
+    if not lat_col or not lon_col or "label" not in nodes_df.columns:
+        return None
+
+    coords_df = nodes_df.copy()
+    coords_df["label"] = coords_df["label"].astype(str)
+    coords_df = coords_df.dropna(subset=[lat_col, lon_col, "label"])
+
+    if coords_df.empty:
+        return None
+
+    coord_lookup = {
+        row["label"]: (float(row[lat_col]), float(row[lon_col]))
+        for _, row in coords_df.iterrows()
+    }
+
+    if target_country not in coord_lookup:
+        return None
+
+    target_lat, target_lon = coord_lookup[target_country]
+    target_rows = top_voters_df[top_voters_df["Recipient"] == target_country].copy()
+    if target_rows.empty:
+        return None
+
+    voter_rows = []
+    for _, row in target_rows.iterrows():
+        voter = str(row["Voter"])
+        if voter not in coord_lookup:
+            continue
+
+        voter_lat, voter_lon = coord_lookup[voter]
+        voter_rows.append({
+            "Voter": voter,
+            "Recipient": target_country,
+            "NVS (0–12)": float(row["NVS (0–12)"]),
+            "Total votes": float(row["Total votes"]),
+            "Eligible years": int(row["Eligible years"]),
+            "Avg/year": float(row["Avg/year"]),
+            "line_lon": [voter_lon, target_lon],
+            "line_lat": [voter_lat, target_lat],
+            "voter_lat": voter_lat,
+            "voter_lon": voter_lon,
+        })
+
+    if not voter_rows:
+        return None
+
+    plot_rows = pd.DataFrame(voter_rows)
+    max_weight = float(plot_rows["NVS (0–12)"].max()) if not plot_rows.empty else 1.0
+    if max_weight <= 0:
+        max_weight = 1.0
+
+    fig = go.Figure()
+
+    for _, row in plot_rows.iterrows():
+        norm_weight = float(row["NVS (0–12)"]) / max_weight
+        line_width = 1.8 + (3.2 * norm_weight)
+        line_opacity = 0.35 + (0.45 * norm_weight)
+
+        fig.add_trace(go.Scattergeo(
+            lon=row["line_lon"],
+            lat=row["line_lat"],
+            mode="lines",
+            line=dict(color="#2f7fbe", width=line_width),
+            opacity=line_opacity,
+            hoverinfo="skip",
+            showlegend=False,
+        ))
+
+    fig.add_trace(go.Scattergeo(
+        lon=plot_rows["voter_lon"],
+        lat=plot_rows["voter_lat"],
+        text=plot_rows["Voter"],
+        customdata=plot_rows[["NVS (0–12)", "Total votes", "Eligible years", "Avg/year"]],
+        mode="markers",
+        name="Top voters",
+        marker=dict(
+            size=11,
+            color="#d1495b",
+            symbol="circle",
+            line=dict(width=1.2, color="white"),
+        ),
+        hovertemplate=(
+            "<b>%{text}</b><br>Votes to " + target_country +
+            "<br>NVS: %{customdata[0]:.2f}" +
+            "<br>Total votes: %{customdata[1]:.0f}" +
+            "<br>Eligible years: %{customdata[2]}" +
+            "<br>Avg/year: %{customdata[3]:.2f}<extra></extra>"
+        ),
+        showlegend=False,
+    ))
+
+    fig.add_trace(go.Scattergeo(
+        lon=[target_lon],
+        lat=[target_lat],
+        text=[target_country],
+        mode="markers+text",
+        textposition="top center",
+        name=target_country,
+        marker=dict(
+            size=15,
+            color="#1f4e79",
+            symbol="star",
+            line=dict(width=1.5, color="white"),
+        ),
+        hovertemplate="<b>%{text}</b><br>Selected country<extra></extra>",
+        showlegend=False,
+    ))
+
+    fig.update_geos(
+        projection_type="natural earth",
+        showland=True,
+        landcolor="#f4f6f9",
+        showocean=True,
+        oceancolor="#fbfcfe",
+        showcountries=True,
+        countrycolor="#c5cfdb",
+        showcoastlines=True,
+        coastlinecolor="#b3bcc8",
+        showframe=False,
+    )
+
+    fig.update_layout(
+        title=f"Top voters flowing to {target_country}",
+        height=620,
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        margin=dict(l=10, r=10, t=70, b=10),
+        showlegend=False,
+    )
+
+    return fig
+
+
 def make_directed_community_flow_map_figure(
     nodes_df,
     community_graph,
@@ -1342,8 +1512,8 @@ def make_directed_community_flow_map_figure(
 
     for edge in flow_edges:
         norm_weight = edge["weight"] / max_weight
-        line_width = 1.5 + (3.0 * norm_weight)
-        line_opacity = 0.35 + (0.45 * norm_weight)
+        line_width = 0.6 + (5.0 * norm_weight)
+        line_opacity = 0.22 + (0.58 * norm_weight)
 
         fig.add_trace(go.Scattergeo(
             lon=edge["line_lon"],
@@ -1420,6 +1590,301 @@ def make_directed_community_flow_map_figure(
     return fig
 
 
+def make_directed_community_vote_map_figure(
+    nodes_df,
+    directed_edge_table: pd.DataFrame,
+    community_name: str,
+    community_color: str,
+    max_edges: int = 25,
+):
+    if nodes_df is None or nodes_df.empty or directed_edge_table is None or directed_edge_table.empty:
+        return None
+
+    lat_col, lon_col = _find_geo_columns(nodes_df)
+    if not lat_col or not lon_col or "label" not in nodes_df.columns:
+        return None
+
+    coords_df = nodes_df.copy()
+    coords_df["label"] = coords_df["label"].astype(str)
+    coords_df = coords_df.dropna(subset=[lat_col, lon_col, "label"])
+
+    if coords_df.empty:
+        return None
+
+    coord_lookup = {
+        row["label"]: (float(row[lat_col]), float(row[lon_col]))
+        for _, row in coords_df.iterrows()
+    }
+
+    plot_edges = directed_edge_table.copy().head(max_edges)
+    plot_edges = plot_edges[
+        plot_edges["Source"].isin(coord_lookup)
+        & plot_edges["Target"].isin(coord_lookup)
+    ].copy()
+
+    if plot_edges.empty:
+        return None
+
+    max_votes = float(plot_edges["Total votes"].max()) if not plot_edges.empty else 1.0
+    if max_votes <= 0:
+        max_votes = 1.0
+
+    node_stats = {}
+    for _, row in plot_edges.iterrows():
+        source = str(row["Source"])
+        target = str(row["Target"])
+        votes = float(row["Total votes"])
+
+        source_stats = node_stats.setdefault(source, {"incoming": 0.0, "outgoing": 0.0})
+        target_stats = node_stats.setdefault(target, {"incoming": 0.0, "outgoing": 0.0})
+        source_stats["outgoing"] += votes
+        target_stats["incoming"] += votes
+
+    max_incoming = max((stats["incoming"] for stats in node_stats.values()), default=1.0)
+    if max_incoming <= 0:
+        max_incoming = 1.0
+
+    fig = go.Figure()
+
+    for _, row in plot_edges.iterrows():
+        source = str(row["Source"])
+        target = str(row["Target"])
+        votes = float(row["Total votes"])
+        nvs_score = float(row["NVS (0–12)"])
+
+        s_lat, s_lon = coord_lookup[source]
+        t_lat, t_lon = coord_lookup[target]
+        norm_votes = votes / max_votes
+        line_width = 0.4 + (6.2 * norm_votes)
+        line_opacity = 0.2 + (0.62 * norm_votes)
+        edge_color = sample_colorscale(sequential.Turbo, [norm_votes])[0]
+
+        fig.add_trace(go.Scattergeo(
+            lon=[s_lon, t_lon],
+            lat=[s_lat, t_lat],
+            mode="lines",
+            line=dict(color=edge_color, width=line_width),
+            opacity=line_opacity,
+            hoverinfo="skip",
+            showlegend=False,
+        ))
+
+        fig.add_trace(go.Scattergeo(
+            lon=[s_lon],
+            lat=[s_lat],
+            mode="markers",
+            marker=dict(
+                size=5 + (3 * norm_votes),
+                color=edge_color,
+                symbol="circle-open",
+                line=dict(width=1, color="white"),
+                opacity=0.9,
+            ),
+            hoverinfo="skip",
+            showlegend=False,
+        ))
+
+        fig.add_trace(go.Scattergeo(
+            lon=[t_lon],
+            lat=[t_lat],
+            mode="markers",
+            marker=dict(
+                size=8 + (4 * norm_votes),
+                color=edge_color,
+                symbol="triangle-right",
+                line=dict(width=1.1, color="white"),
+                opacity=0.95,
+            ),
+            hoverinfo="skip",
+            showlegend=False,
+        ))
+
+    node_lons = []
+    node_lats = []
+    node_text = []
+    node_sizes = []
+    node_colors = []
+    node_customdata = []
+
+    for country, stats in node_stats.items():
+        if country not in coord_lookup:
+            continue
+
+        lat, lon = coord_lookup[country]
+        incoming_votes = float(stats["incoming"])
+        outgoing_votes = float(stats["outgoing"])
+        norm_incoming = incoming_votes / max_incoming
+        node_size = 7.0 + (18.0 * np.sqrt(norm_incoming))
+        node_color = sample_colorscale(sequential.Turbo, [norm_incoming])[0]
+
+        node_lons.append(lon)
+        node_lats.append(lat)
+        node_text.append(country)
+        node_sizes.append(node_size)
+        node_colors.append(node_color)
+        node_customdata.append([incoming_votes, outgoing_votes])
+
+    fig.add_trace(go.Scattergeo(
+        lon=node_lons,
+        lat=node_lats,
+        text=node_text,
+        customdata=node_customdata,
+        mode="markers+text",
+        textposition="top center",
+        textfont=dict(size=10, color="#111827"),
+        marker=dict(
+            size=node_sizes,
+            color=node_colors,
+            line=dict(width=1.3, color="white"),
+            opacity=0.95,
+        ),
+        hovertemplate=(
+            "<b>%{text}</b><br>Votes received: %{customdata[0]:.0f}<br>Votes sent: %{customdata[1]:.0f}<extra></extra>"
+        ),
+        showlegend=False,
+    ))
+
+    fig.update_geos(
+        projection_type="natural earth",
+        showland=True,
+        landcolor="#f7fafc",
+        showocean=True,
+        oceancolor="#eaf4ff",
+        showcountries=True,
+        countrycolor="#aebed2",
+        showcoastlines=True,
+        coastlinecolor="#8aa0ba",
+        showframe=False,
+        center=dict(lon=35, lat=38),
+        projection_scale=1.65,
+        lonaxis=dict(range=[-25, 180]),
+        lataxis=dict(range=[-45, 75]),
+    )
+
+    fig.update_layout(
+        title=f"{community_name} vote-weighted community map",
+        height=660,
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        margin=dict(l=10, r=10, t=70, b=10),
+        showlegend=False,
+        geo=dict(
+            showland=True,
+            landcolor="#f7fafc",
+            showocean=True,
+            oceancolor="#eaf4ff",
+            showcountries=True,
+            countrycolor="#aebed2",
+            showcoastlines=True,
+            coastlinecolor="#8aa0ba",
+            showframe=False,
+            center=dict(lon=35, lat=38),
+            projection=dict(type="natural earth", scale=1.65),
+            lonaxis=dict(range=[-25, 180]),
+            lataxis=dict(range=[-45, 75]),
+        ),
+        annotations=[
+            dict(
+                x=0.5,
+                y=1.03,
+                xref="paper",
+                yref="paper",
+                text="Lines show vote direction from source to target. Circles mark the sender and triangles mark the receiver.",
+                showarrow=False,
+                font=dict(size=12, color="#4b5563"),
+                xanchor="center",
+            )
+        ],
+    )
+
+    return fig
+
+
+def build_vote_color_toolkit(max_votes: float) -> str:
+    if max_votes <= 0:
+        max_votes = 1.0
+
+    steps = [0.0, 0.25, 0.5, 0.75, 1.0]
+    labels = ["Very low", "Low", "Medium", "High", "Very high"]
+    colors = sample_colorscale(sequential.Turbo, steps)
+
+    rows = []
+    for label, frac, color in zip(labels, steps, colors):
+        vote_value = max_votes * frac
+        rows.append(
+            f"<div style='display:flex; align-items:center; gap:8px; margin-bottom:8px;'>"
+            f"<span style='width:18px; height:18px; border-radius:4px; background:{color}; border:1px solid #d1d5db; display:inline-block;'></span>"
+            f"<span><b>{label}</b><br><span style='color:#6b7280; font-size:12px;'>{vote_value:.0f} votes</span></span>"
+            f"</div>"
+        )
+
+    return (
+        "<div style='background:#ffffff; border:1px solid #e5e7eb; border-radius:12px; padding:14px; box-shadow:0 1px 2px rgba(0,0,0,0.04);'>"
+        "<div style='font-weight:700; font-size:15px; margin-bottom:8px; color:#111827;'>Color toolkit</div>"
+        "<div style='font-size:13px; color:#4b5563; margin-bottom:12px;'>"
+        "Brighter / deeper colors mean stronger incoming vote totals. Bigger nodes also mean more incoming votes, thicker lines mean stronger vote links, circles show the source of a vote, and triangles show the receiving country."
+        "</div>"
+        + "".join(rows)
+        + "</div>"
+    )
+
+
+def build_directed_graph_from_edge_rows(edge_rows: pd.DataFrame, member_labels: list[str] | None = None):
+    if not NETWORKX_OK:
+        return None
+
+    if edge_rows is None or edge_rows.empty:
+        return None
+
+    graph = nx.DiGraph()
+
+    if member_labels:
+        for label in member_labels:
+            graph.add_node(label)
+
+    for _, row in edge_rows.iterrows():
+        source = str(row["Source"])
+        target = str(row["Target"])
+        votes = float(row["Total votes"])
+        nvs_score = float(row["NVS (0–12)"])
+
+        graph.add_edge(
+            source,
+            target,
+            weight=votes,
+            display_weight=votes,
+            nvs_score=nvs_score,
+        )
+
+    return graph
+
+
+def build_community_edge_table(agg: pd.DataFrame, members: list[str], top_n: int = 20):
+    if agg is None or agg.empty or not members:
+        return pd.DataFrame()
+
+    edge_df = agg[
+        agg["src_label"].isin(members)
+        & agg["tgt_label"].isin(members)
+        & (agg["total_votes"] > 0)
+    ].copy()
+
+    if edge_df.empty:
+        return pd.DataFrame()
+
+    edge_df = edge_df.sort_values(["total_votes", "nvs_score"], ascending=[False, False]).head(top_n)
+
+    return edge_df[
+        ["src_label", "tgt_label", "total_votes", "nvs_score", "years_eligible"]
+    ].rename(columns={
+        "src_label": "Source",
+        "tgt_label": "Target",
+        "total_votes": "Total votes",
+        "nvs_score": "NVS (0–12)",
+        "years_eligible": "Eligible years",
+    }).reset_index(drop=True)
+
+
 def build_directed_graph_from_nvs(matrix_df, min_edge_weight=0.0, weight_scale=1.0):
     """
     Build a directed graph from the NVS matrix.
@@ -1489,6 +1954,11 @@ def make_directed_network_figure(G, communities_df, show_labels=True, min_node_s
     max_weight = max([data.get("display_weight", 1.0) for _, _, data in G.edges(data=True)], default=1.0)
     if max_weight == 0:
         max_weight = 1.0
+
+    node_in_strength = {node: float(G.in_degree(node, weight="weight")) for node in G.nodes()}
+    max_in_strength = max(node_in_strength.values(), default=1.0)
+    if max_in_strength <= 0:
+        max_in_strength = 1.0
     
     # Prepare edges with directional arrows and color gradient
     edge_traces = []
@@ -1551,15 +2021,16 @@ def make_directed_network_figure(G, communities_df, show_labels=True, min_node_s
         x, y = pos[node]
         comm = community_lookup.get(node, "NA")
         
-        # Node size based on total degree (influence)
+        # Node size based on incoming vote strength
         out_degree = G.out_degree(node, weight="weight")
         in_degree = G.in_degree(node, weight="weight")
         total_degree = out_degree + in_degree
-        size = min_node_size + (total_degree / max_degree * 30)
+        size = min_node_size + (np.sqrt(in_degree / max_in_strength) * 34)
+        size = max(min_node_size * 0.8, size)
         
         node_x.append(x)
         node_y.append(y)
-        node_text.append(f"<b>{node}</b><br>Community: {comm}<br>Out: {out_degree:.1f}<br>In: {in_degree:.1f}")
+        node_text.append(f"<b>{node}</b><br>Community: {comm}<br>Incoming: {in_degree:.1f}<br>Outgoing: {out_degree:.1f}")
         node_color.append(community_to_num.get(comm, 0))
         node_size.append(size)
     
@@ -1694,6 +2165,34 @@ with st.sidebar:
         max_value=8.0,
         value=2.0,
         step=0.25
+    )
+
+    community_top_rank = st.selectbox(
+        "Top 3 communities ranked by",
+        ["Size", "Average Internal Weight"],
+        index=0,
+        help="Controls how the three communities shown on the world map are chosen."
+    )
+
+    st.markdown("---")
+    st.markdown("**Country drill-down**")
+
+    drilldown_start_year = st.selectbox(
+        "Drill-down start year",
+        year_options,
+        index=year_options.index(start_year)
+    )
+
+    drilldown_end_year = st.selectbox(
+        "Drill-down end year",
+        year_options,
+        index=year_options.index(end_year)
+    )
+
+    drilldown_country = st.selectbox(
+        "Country",
+        sorted(filtered_labels),
+        index=0
     )
 
     st.markdown("---")
@@ -2146,6 +2645,18 @@ if enable_comparison:
 # =============================================================================
 
 st.subheader("Detected voting blocs / communities")
+st.markdown(
+    """
+    <div style='background:#f8fafc; border:1px solid #e5e7eb; border-radius:12px; padding:12px 14px; margin-bottom:12px;'>
+        <b>How communities are calculated</b><br>
+        In simple terms: countries are grouped together when they often vote for each other.
+        The app checks how strong the two-way voting connection is, removes very weak links,
+        and then puts the countries into clusters. If the main method is not available,
+        it uses a simpler fallback method.
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 if not NETWORKX_OK:
     st.warning("NetworkX is not installed, so community detection is unavailable.")
@@ -2186,85 +2697,174 @@ else:
             st.info("World map view is unavailable because geographic coordinates were not found for the detected communities.")
 
         st.markdown("---")
-        st.markdown("### Directed voting network inside each community")
-        st.caption("Each community below uses the directed NVS edges only between countries in that community.")
+        st.markdown("### Country voter drill-down")
+        st.caption("Pick a country and year range from the sidebar to see the top 3 incoming voters as directed flows on the world map.")
 
-        # Controls for directed graph
-        col_dir1, col_dir2 = st.columns(2)
+        if drilldown_start_year > drilldown_end_year:
+            st.error("Drill-down start year must be less than or equal to the end year.")
+        else:
+            drill_period = compute_period_data(drilldown_start_year, drilldown_end_year)
 
-        with col_dir1:
-            directed_edge_threshold = st.slider(
-                "Edge threshold (directed graph)",
-                min_value=0.0,
-                max_value=6.0,
-                value=0.5,
-                step=0.25,
-                help="Only show edges with NVS >= this value"
-            )
+            if drill_period is None:
+                st.warning("No data available for the selected drill-down years.")
+            else:
+                top_voters_df = build_top_voters_for_country(drill_period, drilldown_country, top_n=3)
 
-        with col_dir2:
-            directed_weight_scale = st.slider(
-                "Edge width scale",
-                min_value=0.5,
-                max_value=3.0,
-                value=1.0,
-                step=0.1,
-                help="Multiplier for edge thickness"
-            )
+                if top_voters_df.empty:
+                    st.info(f"No incoming voting flows found for {drilldown_country} in the selected years.")
+                else:
+                    st.markdown("#### Top 3 voters")
+                    st.caption(f"Showing votes flowing into {drilldown_country} from {drilldown_start_year} to {drilldown_end_year}.")
+                    st.dataframe(top_voters_df.round({"NVS (0–12)": 2, "Avg/year": 2}), use_container_width=True)
 
-        # Build the full directed graph once, then split it by community.
-        directed_graph = build_directed_graph_from_nvs(
-            m_nvs,
-            min_edge_weight=directed_edge_threshold,
-            weight_scale=directed_weight_scale
+                    fig_country_map = make_directed_country_world_map_figure(
+                        nodes,
+                        drilldown_country,
+                        top_voters_df,
+                    )
+
+                    if fig_country_map is not None:
+                        st.plotly_chart(fig_country_map, use_container_width=True)
+                    else:
+                        st.info("Country flow map is unavailable because geographic coordinates were not found for one or more voters.")
+
+                drill_order = get_country_order(
+                    drill_period,
+                    filtered_labels,
+                    order_mode=order_mode
+                )
+
+                drill_agg = filter_agg_by_order(drill_period["agg"], drill_order)
+                drill_matrix = build_matrix(drill_agg, "nvs_score", drill_order)
+                drill_communities_df, drill_community_graph = detect_communities_from_nvs(
+                    drill_matrix,
+                    min_edge_weight=community_min_weight
+                )
+
+                if drill_communities_df.empty:
+                    st.info("No communities detected for the selected drill-down years with the current threshold.")
+                else:
+                    if community_top_rank == "Average Internal Weight":
+                        sort_keys = ["Average Internal Weight", "Size"]
+                    else:
+                        sort_keys = ["Size", "Average Internal Weight"]
+
+                    top_communities_df = (
+                        drill_communities_df
+                        .sort_values(sort_keys, ascending=[False, False])
+                        .head(3)
+                        .reset_index(drop=True)
+                    )
+
+                    st.markdown("#### Top 3 communities")
+                    st.caption(f"Showing the top 3 communities detected from {drilldown_start_year} to {drilldown_end_year}.")
+                    st.dataframe(top_communities_df.round({"Average Internal Weight": 2}), use_container_width=True)
+
+                    fig_top_community_map = make_community_world_map_figure(
+                        nodes,
+                        top_communities_df,
+                    )
+
+                    if fig_top_community_map is not None:
+                        st.plotly_chart(fig_top_community_map, use_container_width=True)
+                    else:
+                        st.info("Top-community world map is unavailable because geographic coordinates were not found for the detected communities.")
+
+        st.markdown("---")
+        st.markdown("### Community detail view")
+        st.caption("Select one community to inspect its directed voting network, strongest vote edges, and world-map flow.")
+
+        sorted_communities_df = communities_df.sort_values(
+            ["Size", "Average Internal Weight"],
+            ascending=[False, False]
+        ).reset_index(drop=True)
+
+        selected_community_name = st.selectbox(
+            "Inspect community",
+            sorted_communities_df["Community"].tolist(),
+            index=0
         )
 
-        if directed_graph is not None and directed_graph.number_of_nodes() > 0:
-            for _, community_row in communities_df.iterrows():
-                community_name = community_row["Community"]
-                members = [m.strip() for m in community_row["Members"].split(",") if m.strip()]
-                community_nodes = [node for node in members if node in directed_graph]
+        selected_community_row = sorted_communities_df[
+            sorted_communities_df["Community"] == selected_community_name
+        ].iloc[0]
 
-                st.markdown(f"#### {community_name}")
-                st.caption(
-                    f"Size: {int(community_row['Size'])} | Members: {community_row['Members']}"
-                )
+        selected_members = [m.strip() for m in str(selected_community_row["Members"]).split(",") if m.strip()]
 
-                community_subgraph = directed_graph.subgraph(community_nodes).copy()
+        selected_edge_rows = agg[
+            agg["src_label"].isin(selected_members)
+            & agg["tgt_label"].isin(selected_members)
+            & (agg["total_votes"] > 0)
+        ].copy()
 
-                if community_subgraph.number_of_nodes() == 0:
-                    st.info(f"No directed nodes available for {community_name} after filtering.")
-                    continue
-
-                fig_directed = make_directed_network_figure(
-                    community_subgraph,
-                    communities_df,
-                    show_labels=True,
-                    min_node_size=25,
-                    title=f"{community_name} directed voting network"
-                )
-
-                if fig_directed is not None:
-                    st.plotly_chart(fig_directed, use_container_width=True)
-                else:
-                    st.info(f"No directed edges meet the current threshold inside {community_name}.")
-
-                fig_flow_map = make_directed_community_flow_map_figure(
-                    nodes,
-                    community_subgraph,
-                    community_name,
-                    community_colors.get(community_name, "#64748b"),
-                    max_flows=20,
-                )
-
-                if fig_flow_map is not None:
-                    st.markdown(f"##### {community_name} flow map")
-                    st.caption("Arrows show the strongest directed flow from each country inside the community.")
-                    st.plotly_chart(fig_flow_map, use_container_width=True)
-                else:
-                    st.info(f"No flow-map view available for {community_name} with the current filters.")
+        if selected_edge_rows.empty:
+            st.info(f"No directed vote edges found inside {selected_community_name} for the current filters.")
         else:
-            st.info("No edges meet the current threshold. Try lowering the edge threshold.")
+            selected_edge_rows = selected_edge_rows.sort_values(
+                ["total_votes", "nvs_score"],
+                ascending=[False, False]
+            )
+
+            directed_edge_table = selected_edge_rows[
+                ["src_label", "tgt_label", "total_votes", "nvs_score", "years_eligible"]
+            ].rename(columns={
+                "src_label": "Source",
+                "tgt_label": "Target",
+                "total_votes": "Total votes",
+                "nvs_score": "NVS (0–12)",
+                "years_eligible": "Eligible years",
+            }).reset_index(drop=True)
+
+            community_directed_graph = build_directed_graph_from_edge_rows(
+                directed_edge_table,
+                selected_members,
+            )
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Size", int(selected_community_row["Size"]))
+            c2.metric("Internal edges", int(selected_community_row["Internal Edges"]))
+            c3.metric("Avg internal weight", f"{float(selected_community_row['Average Internal Weight']):.2f}")
+
+            st.markdown("#### Strongest directed edges")
+            st.caption("Edge thickness in the graph follows raw vote totals for the selected community and period.")
+            st.dataframe(
+                directed_edge_table.head(15).round({"Total votes": 0, "NVS (0–12)": 2}),
+                use_container_width=True,
+            )
+
+            fig_directed = make_directed_network_figure(
+                community_directed_graph,
+                communities_df,
+                show_labels=True,
+                min_node_size=25,
+                title=f"{selected_community_name} directed voting network"
+            )
+
+            if fig_directed is not None:
+                st.plotly_chart(fig_directed, use_container_width=True)
+            else:
+                st.info(f"No directed network could be built for {selected_community_name}.")
+
+            fig_flow_map = make_directed_community_vote_map_figure(
+                nodes,
+                directed_edge_table,
+                selected_community_name,
+                community_colors.get(selected_community_name, "#64748b"),
+                max_edges=20,
+            )
+
+            if fig_flow_map is not None:
+                st.markdown("#### Community vote map")
+                st.caption("The map below plots directed vote flows. Bigger nodes mean more incoming votes, circles mark the sender, and triangles mark the receiver.")
+                map_col, toolkit_col = st.columns([4, 1])
+
+                with map_col:
+                    st.plotly_chart(fig_flow_map, use_container_width=True)
+
+                with toolkit_col:
+                    st.markdown(build_vote_color_toolkit(float(directed_edge_table["Total votes"].max())), unsafe_allow_html=True)
+            else:
+                st.info(f"No vote-map view available for {selected_community_name} with the current filters.")
 
 
 # =============================================================================

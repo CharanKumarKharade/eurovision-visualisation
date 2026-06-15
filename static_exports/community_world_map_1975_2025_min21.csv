@@ -1,0 +1,4 @@
+Community,Method,Size,Members,Internal Edges,Average Internal Weight
+C1,Louvain,11,"Albania, Croatia, Cyprus, Greece, Italy, Malta, North Macedonia, Romania, Slovenia, Turkey, Yugoslavia",27,4.024897808522787
+C2,Louvain,10,"Denmark, Estonia, Finland, Iceland, Latvia, Lithuania, Norway, Poland, Russia, Sweden",29,3.463924568125971
+C3,Louvain,13,"Austria, Belgium, France, Germany, Ireland, Israel, Luxembourg, Monaco, Netherlands, Portugal, Spain, Switzerland, United Kingdom",67,2.8742531240838396

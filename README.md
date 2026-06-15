@@ -160,6 +160,21 @@ The dashboard supports:
 - Downloadable HTML visualizations
 
 --------------------------------------------------------------------
+
+11. Static Community World Map Export
+------------------------------------
+If you need a non-Streamlit output, run the standalone exporter in
+`static_exports/` to generate a static PNG of the detected communities on a
+world map.
+
+Default settings:
+- Year range: 1975 to 2025
+- Minimum participation: 21 years
+
+Run:
+    python static_exports/generate_community_world_map.py
+
+--------------------------------------------------------------------
 NORMALIZED VOTING SCORE (NVS)
 --------------------------------------------------------------------
 
