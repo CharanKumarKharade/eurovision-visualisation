@@ -47,6 +47,13 @@ try:
 except Exception:
     SCIPY_OK = False
 
+try:
+    import draft_visualizations as draftviz
+    DRAFTVIZ_OK = True
+except Exception as _draftviz_err:
+    DRAFTVIZ_OK = False
+    _draftviz_import_error = _draftviz_err
+
 
 # =============================================================================
 # PAGE CONFIGURATION
@@ -754,30 +761,187 @@ all_years_available = sorted(edges["year"].unique())
 ROOT_START = max(ROOT_START, min(all_years_available))
 ROOT_END = min(ROOT_END, max(all_years_available))
 
+# =============================================================================
+# GLOBAL DATA-SCOPE NOTICE
+#
+# This app intentionally restricts every computation to the
+# [ROOT_START, ROOT_END] window (default: 1975-2025). Even if the source
+# CSV (eurovision_senior.csv) contains rows for years outside this range
+# (for example, earlier contest history before 1975), those rows are
+# excluded everywhere in this app: the main NVS matrix, community/bloc
+# detection, period comparisons, "top voters" drill-down, and pair trend
+# analysis. This keeps the NVS normalisation consistent, since the
+# era-based scoring system (ERA_MAX) defined above is only calibrated for
+# 1975 onward.
+# =============================================================================
+
+st.info(
+    f"ℹ️ **Data scope for this app:** every chart, table, and statistic here "
+    f"is computed using Eurovision voting data from **{ROOT_START} to "
+    f"{ROOT_END}** only ({ROOT_END - ROOT_START + 1} contest years). This "
+    f"includes the main voting matrix, community/bloc detection, period "
+    f"comparisons, the country voter drill-down ('top voters'), and the "
+    f"pair trend analysis further down the page. Data from years outside "
+    f"this range — if present in the source file — is never loaded or "
+    f"used anywhere in this app."
+)
+
+
+# =============================================================================
+# DRAFT VISUALISATION GALLERY  (Graph Drawing Contest 2026 poster drafts)
+#
+# This section lets a reader jump from the main exploratory app into any of
+# five standalone "draft" visualisations (built in draft_visualizations.py),
+# each exploring a different, non-overlapping angle on the same 1975-2025
+# NVS dataset. Selecting a draft below REPLACES the rest of the app for
+# this run — a "Back to main app" button returns to the normal dashboard.
+#
+# Navigation is done via st.session_state["active_draft"]:
+#   None            -> show the normal app (everything below this block)
+#   "<draft name>"  -> render only that draft's figure + explanation,
+#                      then st.stop() so nothing else on the page renders.
+# =============================================================================
+
+DRAFT_REGISTRY = {
+    "— None (show main app) —": None,
+    "1. Unrequited Love — Voting Asymmetry":     "unrequited_love",
+    "2. The Neighbour Effect":                   "neighbour_effect",
+    "3. Alliance Lifespan Arcs":                 "lifespan_arcs",
+    "4. Rise and Fall — Era Dominance":          "rise_and_fall",
+    "5. Voting Hall of Fame":                    "hall_of_fame",
+}
+
+if "active_draft" not in st.session_state:
+    st.session_state["active_draft"] = None
+
+with st.sidebar:
+    st.markdown("---")
+    st.markdown("### 🎨 Draft visualisations (GD Contest 2026)")
+    st.caption(
+        "Five standalone poster-draft diagrams, each using a different "
+        "analytical lens on the same 1975–2025 NVS data. Pick one to view "
+        "it full-page; use 'Back to main app' there to return here."
+    )
+
+    draft_choice_label = st.selectbox(
+        "View a draft visualisation",
+        list(DRAFT_REGISTRY.keys()),
+        index=0,
+        key="draft_selectbox",
+    )
+    draft_choice = DRAFT_REGISTRY[draft_choice_label]
+
+    if draft_choice is not None:
+        st.session_state["active_draft"] = draft_choice
+    elif st.session_state.get("active_draft") is not None and draft_choice is None:
+        # User explicitly reset the dropdown back to "None"
+        st.session_state["active_draft"] = None
+
+
+def _render_draft_header(title: str, explanation_md: str):
+    """Shared header block for every draft page: title, explanation, back button."""
+    st.title(f"📊 Draft: {title}")
+    st.caption(
+        f"Data scope: Eurovision {ROOT_START}–{ROOT_END} only. "
+        f"This is a standalone draft for the Graph Drawing Contest 2026 poster — "
+        f"it is computed independently from the sidebar filters on the main app."
+    )
+    st.markdown(explanation_md)
+    if st.button("⬅ Back to main app", key=f"back_btn_{title}"):
+        st.session_state["active_draft"] = None
+        st.rerun()
+    st.markdown("---")
+
+
+if st.session_state.get("active_draft") is not None:
+    _draft_key = st.session_state["active_draft"]
+
+    if not DRAFTVIZ_OK:
+        st.error(
+            f"Could not load draft_visualizations.py: {_draft_key}. "
+            "Make sure draft_visualizations.py is in the same folder as this app. "
+            f"Import error: {_draftviz_import_error if '_draftviz_import_error' in dir() else 'unknown'}"
+        )
+        if st.button("⬅ Back to main app"):
+            st.session_state["active_draft"] = None
+            st.rerun()
+        st.stop()
+
+    # Full 1975-2025 dataset, independent of the main app's sidebar filters —
+    # drafts are meant to stand alone as poster candidates.
+    draft_df_full = edges.copy()
+
+    with st.spinner("Building draft visualisation — this can take a few seconds for community detection..."):
+
+        if _draft_key == "unrequited_love":
+            fig, title, explanation = draftviz.build_unrequited_love(
+                draft_df_full, id2label, min_years=15, top_n_arcs=40
+            )
+
+        elif _draft_key == "neighbour_effect":
+            fig, title, explanation = draftviz.build_neighbour_effect(
+                draft_df_full, id2label, nodes, min_years=15, n_labels=8
+            )
+
+        elif _draft_key == "lifespan_arcs":
+            fig, title, explanation = draftviz.build_lifespan_arcs(
+                draft_df_full, id2label, min_years=15, threshold=0.35, top_n=35
+            )
+
+        elif _draft_key == "rise_and_fall":
+            fig, title, explanation = draftviz.build_rise_and_fall(
+                draft_df_full, id2label, min_years=10, decade_size=10, top_supporters=5
+            )
+
+        elif _draft_key == "hall_of_fame":
+            fig, title, explanation = draftviz.build_hall_of_fame(
+                draft_df_full, id2label, min_years=15
+            )
+
+        else:
+            fig, title, explanation = None, "Unknown draft", "Unknown draft key."
+
+    _render_draft_header(title, explanation)
+
+    if fig is None:
+        st.warning("This draft could not be generated with the current data/filters.")
+    else:
+        st.plotly_chart(fig, use_container_width=True)
+
+    st.stop()  # Do not render the rest of the main app below this point.
+
 
 # =============================================================================
 # PARTICIPATION COUNTS
 # =============================================================================
 
 @st.cache_data
-def compute_participation_counts():
-    src_years = edges.groupby(src_col)["year"].nunique().rename("years")
-    tgt_years = edges.groupby(tgt_col)["year"].nunique().rename("years")
+def compute_participation_counts(start_year: int | None = None, end_year: int | None = None):
+    """
+    Count distinct years each country appears in (as source or target).
+
+    If start_year/end_year are provided, only years within that window are
+    counted — so 'participated 25+ years' means 25+ years WITHIN the
+    selected range, not 25+ years across the entire 1975-2025 dataset.
+    """
+    df = edges
+    if start_year is not None and end_year is not None:
+        df = edges[(edges["year"] >= start_year) & (edges["year"] <= end_year)]
+
+    src_years = df.groupby(src_col)["year"].nunique().rename("years")
+    tgt_years = df.groupby(tgt_col)["year"].nunique().rename("years")
 
     combined = pd.concat([src_years, tgt_years]).groupby(level=0).max()
 
     return combined.to_dict()
 
 
-participation_counts = compute_participation_counts()
-
-
-def participation_years_for_label(label: str) -> int:
+def participation_years_for_label(label: str, counts: dict) -> int:
     for cid, lbl in id2label.items():
         if lbl == label:
-            return participation_counts.get(cid, 0)
+            return counts.get(cid, 0)
 
-    return participation_counts.get(label, 0)
+    return counts.get(label, 0)
 
 
 # =============================================================================
@@ -919,6 +1083,12 @@ def get_country_order(period_data, all_labels, order_mode="strength"):
 def compute_pair_behaviour(start_year: int, end_year: int):
     """
     Compute dynamic relationship metrics only for the selected year range.
+
+    DATA SCOPE: `start_year` and `end_year` are always values from the
+    sidebar selectboxes, which are themselves constrained to
+    [ROOT_START, ROOT_END] = [1975, 2025]. This function (and therefore the
+    "Pair trend analysis" and relationship classification tables it feeds)
+    never sees Eurovision data outside that fixed window.
     """
     pdata = compute_period_data(start_year, end_year)
 
@@ -1240,6 +1410,22 @@ def make_community_world_map_figure(nodes_df, communities_df):
 
 
 def build_top_voters_for_country(period_data, target_country: str, top_n: int = 3):
+    """
+    Find the top-N countries (by NVS score) that voted for `target_country`.
+
+    IMPORTANT — SCOPE OF DATA:
+    `period_data` must come from `compute_period_data(start_year, end_year)`,
+    where start_year and end_year are constrained to the 1975-2025 window
+    (ROOT_START / ROOT_END). This function does NOT independently re-filter
+    by year — it only sees whatever year range was already baked into
+    `period_data` by the caller. If the underlying eurovision_senior.csv
+    contains years before 1975 (e.g. early contest history), those rows are
+    excluded upstream by ROOT_START and never reach this function.
+
+    In other words: "top voters" here always means "top voters within the
+    1975-2025 era using NVS normalisation", never the full unfiltered
+    historical dataset.
+    """
     if period_data is None or not target_country:
         return pd.DataFrame()
 
@@ -2085,6 +2271,507 @@ def make_directed_network_figure(G, communities_df, show_labels=True, min_node_s
 
 
 # =============================================================================
+# DRAFT VISUALISATION GALLERY — BUILDER FUNCTIONS
+#
+# These five functions build the static/semi-static draft visualisations
+# explored for the GD Contest 2026 poster. Each one is intentionally a
+# DIFFERENT mathematical lens on the same NVS-normalised voting data, so
+# none of them duplicate the Sankey / Sunburst / GeoMap drafts built
+# separately. Every builder returns (figure, title, description_markdown)
+# so the gallery dispatcher can render a consistent header above each plot.
+# =============================================================================
+
+def draft_unrequited_love(agg: pd.DataFrame, order: list[str], top_n: int = 40):
+    """
+    DRAFT 1 — Unrequited Love: Voting Asymmetry Arc Diagram
+
+    For every country pair (A, B), computes:
+        asymmetry(A,B) = NVS(A->B) - NVS(B->A)
+
+    Only the `top_n` pairs with the LARGEST absolute asymmetry are drawn as
+    arcs around a circle. Balanced relationships (where both countries give
+    roughly equal NVS to each other) are excluded entirely — this diagram
+    only shows imbalance, not overall strength.
+
+    Arc colour:  red  = the country at the ARROW END receives MORE than it gives
+                 blue = the country at the ARROW END gives MORE than it receives
+    Arc width:   magnitude of the asymmetry (|NVS(A->B) - NVS(B->A)|)
+    """
+    countries = list(order)
+    n = len(countries)
+    angle = {c: 2 * np.pi * i / n for i, c in enumerate(countries)}
+    pos = {c: (np.cos(angle[c]), np.sin(angle[c])) for c in countries}
+
+    # Build symmetric pair table with directed NVS in both directions
+    nvs_lookup = {(r["src_label"], r["tgt_label"]): r["nvs_score"] for _, r in agg.iterrows()}
+
+    pairs = []
+    seen = set()
+    for a in countries:
+        for b in countries:
+            if a == b or (b, a) in seen:
+                continue
+            seen.add((a, b))
+            ab = nvs_lookup.get((a, b), 0.0)
+            ba = nvs_lookup.get((b, a), 0.0)
+            asym = ab - ba
+            if abs(asym) < 1e-9:
+                continue
+            pairs.append({"a": a, "b": b, "ab": ab, "ba": ba, "asym": asym})
+
+    pairs_df = pd.DataFrame(pairs)
+    if pairs_df.empty:
+        return None, "Unrequited Love", "No asymmetric pairs found with the current filters."
+
+    pairs_df["abs_asym"] = pairs_df["asym"].abs()
+    pairs_df = pairs_df.sort_values("abs_asym", ascending=False).head(top_n)
+
+    max_asym = float(pairs_df["abs_asym"].max()) or 1.0
+
+    fig = go.Figure()
+
+    # Node circle
+    node_x = [pos[c][0] for c in countries]
+    node_y = [pos[c][1] for c in countries]
+    fig.add_trace(go.Scatter(
+        x=node_x, y=node_y, mode="markers+text",
+        text=countries, textposition="top center",
+        textfont=dict(size=9),
+        marker=dict(size=9, color="#374151", line=dict(width=1, color="white")),
+        hoverinfo="text", showlegend=False,
+    ))
+
+    for _, row in pairs_df.iterrows():
+        # The arrow points toward whoever RECEIVES more (the "beloved")
+        if row["asym"] > 0:
+            giver, receiver = row["a"], row["b"]   # a gives more to b than b gives to a
+            color = "rgba(214,96,77,0.75)"          # red: receiver is loved more than they give back
+        else:
+            giver, receiver = row["b"], row["a"]
+            color = "rgba(43,108,176,0.75)"          # blue
+
+        x0, y0 = pos[giver]
+        x1, y1 = pos[receiver]
+        # Bezier curve pulled toward the centre for a chord-like look
+        cx, cy = (x0 + x1) / 2 * 0.25, (y0 + y1) / 2 * 0.25
+        t = np.linspace(0, 1, 24)
+        bx = (1 - t) ** 2 * x0 + 2 * (1 - t) * t * cx + t ** 2 * x1
+        by = (1 - t) ** 2 * y0 + 2 * (1 - t) * t * cy + t ** 2 * y1
+
+        width = 0.6 + 5.0 * (row["abs_asym"] / max_asym)
+
+        fig.add_trace(go.Scatter(
+            x=bx, y=by, mode="lines",
+            line=dict(width=width, color=color),
+            hoverinfo="text",
+            text=(
+                f"{giver} → {receiver} unrequited<br>"
+                f"{giver}→{receiver} NVS: {row['ab'] if giver==row['a'] else row['ba']:.2f}<br>"
+                f"{receiver}→{giver} NVS: {row['ba'] if giver==row['a'] else row['ab']:.2f}<br>"
+                f"Asymmetry: {row['abs_asym']:.2f}"
+            ),
+            showlegend=False,
+        ))
+
+    fig.update_layout(
+        xaxis=dict(visible=False, range=[-1.3, 1.3]),
+        yaxis=dict(visible=False, range=[-1.3, 1.3], scaleanchor="x", scaleratio=1),
+        height=820, width=820,
+        paper_bgcolor="white", plot_bgcolor="white",
+        margin=dict(l=10, r=10, t=10, b=10),
+        showlegend=False,
+    )
+
+    title = "Unrequited Love — Voting Asymmetry Arcs"
+    desc = (
+        "**Metric:** `asymmetry(A,B) = NVS(A→B) − NVS(B→A)`, computed from the mean "
+        "Normalised Voting Share in each direction within the selected period.\n\n"
+        f"Only the **top {top_n} most imbalanced pairs** are drawn — perfectly "
+        "reciprocal relationships are invisible here on purpose. "
+        "**Red arcs** end at the country that receives more affection than it gives "
+        "back; **blue arcs** end at the country that gives more than it receives. "
+        "Arc thickness scales with the size of the imbalance, not the absolute "
+        "voting strength."
+    )
+    return fig, title, desc
+
+
+def draft_compass_rose(nodes_df: pd.DataFrame, agg: pd.DataFrame, order: list[str]):
+    """
+    DRAFT 2 — Compass Voting Rose
+
+    Bins every qualifying country by COMPASS BEARING and DISTANCE from the
+    geographic centroid of all included countries, then colours each
+    angle/distance cell by the mean NVS that countries in that cell receive
+    from all other countries. Tests whether voting strength is geographically
+    directional (e.g. concentrated to the East/North) or distance-decaying.
+    """
+    lat_col, lon_col = _find_geo_columns(nodes_df)
+    if not lat_col or not lon_col or "label" not in nodes_df.columns:
+        return None, "Compass Voting Rose", "Geographic coordinates not found in nodes file."
+
+    coords = nodes_df.dropna(subset=[lat_col, lon_col, "label"]).copy()
+    coords = coords[coords["label"].isin(order)]
+    if coords.empty:
+        return None, "Compass Voting Rose", "No coordinate data for the currently selected countries."
+
+    centroid_lat = coords[lat_col].astype(float).mean()
+    centroid_lon = coords[lon_col].astype(float).mean()
+
+    def bearing(lat1, lon1, lat2, lon2):
+        lat1, lon1, lat2, lon2 = map(np.radians, [lat1, lon1, lat2, lon2])
+        dlon = lon2 - lon1
+        x = np.sin(dlon) * np.cos(lat2)
+        y = np.cos(lat1) * np.sin(lat2) - np.sin(lat1) * np.cos(lat2) * np.cos(dlon)
+        return (np.degrees(np.arctan2(x, y)) + 360) % 360
+
+    def haversine(lat1, lon1, lat2, lon2):
+        lat1, lon1, lat2, lon2 = map(np.radians, [lat1, lon1, lat2, lon2])
+        dlat, dlon = lat2 - lat1, lon2 - lon1
+        a = np.sin(dlat/2)**2 + np.cos(lat1)*np.cos(lat2)*np.sin(dlon/2)**2
+        return 6371 * 2 * np.arcsin(np.sqrt(a))
+
+    coords["bearing"]  = coords.apply(
+        lambda r: bearing(centroid_lat, centroid_lon, float(r[lat_col]), float(r[lon_col])), axis=1)
+    coords["distance"] = coords.apply(
+        lambda r: haversine(centroid_lat, centroid_lon, float(r[lat_col]), float(r[lon_col])), axis=1)
+
+    received = agg.groupby("tgt_label")["nvs_score"].mean().rename("mean_nvs_received")
+    coords = coords.merge(received, left_on="label", right_index=True, how="left")
+    coords["mean_nvs_received"] = coords["mean_nvs_received"].fillna(0)
+
+    n_sectors = 16
+    sector_width = 360 / n_sectors
+    coords["sector"] = (coords["bearing"] // sector_width).astype(int) % n_sectors
+
+    dist_bins = [0, 500, 1000, 1800, 4000, np.inf]
+    dist_labels = ["0-500km", "500-1000km", "1000-1800km", "1800-4000km", "4000km+"]
+    coords["dist_band"] = pd.cut(coords["distance"], bins=dist_bins, labels=dist_labels)
+
+    pivot = (
+        coords.groupby(["sector", "dist_band"])["mean_nvs_received"]
+        .mean().reset_index()
+    )
+
+    sector_names = [
+        "N","NNE","NE","ENE","E","ESE","SE","SSE",
+        "S","SSW","SW","WSW","W","WNW","NW","NNW",
+    ]
+
+    fig = go.Figure()
+    for band in dist_labels:
+        band_rows = pivot[pivot["dist_band"] == band]
+        theta = [sector_names[int(s)] for s in band_rows["sector"]]
+        r = [float(band_rows.loc[band_rows["sector"] == s, "mean_nvs_received"].values[0])
+             if s in band_rows["sector"].values else 0
+             for s in band_rows["sector"]]
+        fig.add_trace(go.Barpolar(
+            r=band_rows["mean_nvs_received"],
+            theta=theta,
+            name=band,
+            hovertemplate="Direction: %{theta}<br>Mean NVS received: %{r:.2f}<extra></extra>",
+        ))
+
+    fig.update_layout(
+        polar=dict(
+            radialaxis=dict(title="Mean NVS received", showticklabels=True),
+            angularaxis=dict(direction="clockwise", rotation=90),
+        ),
+        height=750, width=850,
+        paper_bgcolor="white",
+        legend_title_text="Distance band from<br>Europe centroid",
+    )
+
+    title = "Compass Voting Rose"
+    desc = (
+        "**Metric:** each country is binned by **compass bearing** (16 sectors) "
+        "and **great-circle distance** (5 bands) from the geographic centroid of "
+        "all currently-included countries. Each wedge is coloured/sized by the "
+        "**mean NVS received** by countries in that direction/distance cell.\n\n"
+        "This tests whether Eurovision voting strength is geographically directional "
+        "(e.g. concentrated toward specific compass directions) or whether it decays "
+        "with distance — a question not addressed by bloc/community detection alone."
+    )
+    return fig, title, desc
+
+
+def draft_lifespan_arcs(yr_agg: pd.DataFrame, threshold: float = 4.0, min_run: int = 3, top_n: int = 25):
+    """
+    DRAFT 3 — Alliance Lifespan Arcs
+
+    For every directed pair, finds contiguous runs of years where the yearly
+    NVS score stayed >= `threshold`. Each qualifying run (length >= min_run)
+    becomes a horizontal segment on a year-axis timeline. Pairs are sorted by
+    TOTAL qualifying duration, and only the top_n longest-lived alliances are
+    shown — this makes DURATION itself the primary visual variable, distinct
+    from the Sankey (bloc snapshot) and Sunburst (top-3 supporters) drafts.
+    """
+    df = yr_agg.copy()
+    df["src_label"] = df.get("src_label", df.get("source"))
+    df["tgt_label"] = df.get("tgt_label", df.get("target"))
+    df["nvs_score_year"] = df["nvs_year"] * 12
+
+    runs = []
+    for (src, tgt), g in df.groupby(["src_label", "tgt_label"]):
+        g = g.sort_values("year")
+        years = g["year"].to_numpy()
+        vals  = g["nvs_score_year"].to_numpy()
+        above = vals >= threshold
+
+        run_start = None
+        for i in range(len(years)):
+            if above[i] and run_start is None:
+                run_start = years[i]
+            if (not above[i] or i == len(years) - 1) and run_start is not None:
+                run_end = years[i] if above[i] else years[i - 1]
+                if run_end - run_start + 1 >= min_run:
+                    seg_vals = vals[(years >= run_start) & (years <= run_end)]
+                    runs.append({
+                        "pair": f"{src} → {tgt}",
+                        "src": src, "tgt": tgt,
+                        "start": int(run_start), "end": int(run_end),
+                        "duration": int(run_end - run_start + 1),
+                        "mean_nvs": float(np.mean(seg_vals)),
+                        "stability": float(max(0.0, 1.0 - np.std(seg_vals) / (np.mean(seg_vals) + 1e-6))),
+                    })
+                run_start = None
+
+    runs_df = pd.DataFrame(runs)
+    if runs_df.empty:
+        return None, "Alliance Lifespan Arcs", "No alliances met the duration/threshold criteria."
+
+    total_duration = runs_df.groupby("pair")["duration"].sum().sort_values(ascending=False)
+    top_pairs = total_duration.head(top_n).index.tolist()
+    runs_df = runs_df[runs_df["pair"].isin(top_pairs)]
+
+    pair_order = total_duration.loc[top_pairs].index.tolist()
+    y_index = {p: i for i, p in enumerate(pair_order)}
+
+    fig = go.Figure()
+    for _, row in runs_df.iterrows():
+        y = y_index[row["pair"]]
+        color = sample_colorscale(
+            sequential.Tealgrn if hasattr(sequential, "Tealgrn") else sequential.Teal,
+            [min(max(row["stability"], 0.0), 1.0)]
+        )[0]
+        fig.add_trace(go.Scatter(
+            x=[row["start"], row["end"]],
+            y=[y, y],
+            mode="lines",
+            line=dict(width=10, color=color),
+            hovertemplate=(
+                f"<b>{row['pair']}</b><br>"
+                f"{row['start']}–{row['end']} ({row['duration']} yrs)<br>"
+                f"Mean NVS in run: {row['mean_nvs']:.2f}<br>"
+                f"Stability: {row['stability']:.2f}<extra></extra>"
+            ),
+            showlegend=False,
+        ))
+
+    fig.update_layout(
+        yaxis=dict(
+            tickmode="array",
+            tickvals=list(range(len(pair_order))),
+            ticktext=pair_order,
+            title="Country pair (sorted by total years above threshold)",
+            autorange="reversed",
+        ),
+        xaxis=dict(title="Year", range=[1973, 2027]),
+        height=max(500, len(pair_order) * 26 + 150),
+        width=1000,
+        paper_bgcolor="white", plot_bgcolor="white",
+        margin=dict(l=220, r=40, t=20, b=60),
+    )
+
+    title = "Alliance Lifespan Arcs"
+    desc = (
+        f"**Metric:** for each directed pair, finds contiguous year-runs where "
+        f"yearly NVS stayed ≥ **{threshold}/12**, keeping only runs of "
+        f"**{min_run}+ consecutive years**. Pairs are ranked by **total qualifying "
+        f"duration** and only the top {top_n} longest-lived alliances are shown.\n\n"
+        "**Segment colour** encodes stability (darker = more consistent NVS within "
+        "that run). Gaps in a row mean the alliance temporarily fell below threshold "
+        "— this is the only draft that makes *duration* itself the primary visual "
+        "variable."
+    )
+    return fig, title, desc
+
+
+def draft_cohesion_streamgraph(yr_agg: pd.DataFrame, communities_df: pd.DataFrame, window: int = 5):
+    """
+    DRAFT 4 — Bloc Cohesion Streamgraph
+
+    Bloc MEMBERSHIP is fixed (taken from the already-detected communities for
+    the current period/filters). For each rolling `window`-year period, this
+    recomputes the MEAN MUTUAL AFFINITY *within* each fixed bloc — i.e. how
+    tightly-knit the bloc's existing members are voting for each other in
+    that window, even though who belongs to the bloc never changes.
+
+    This answers a question snapshots can't: blocs can keep the same members
+    but drift from tightly-knit to barely-cohesive (or vice versa) over time.
+    """
+    if communities_df is None or communities_df.empty:
+        return None, "Bloc Cohesion Streamgraph", "No communities detected — adjust the bloc threshold first."
+
+    df = yr_agg.copy()
+    df["src_label"] = df.get("src_label", df.get("source"))
+    df["tgt_label"] = df.get("tgt_label", df.get("target"))
+    df["nvs_score_year"] = df["nvs_year"] * 12
+
+    bloc_members = {
+        row["Community"]: [m.strip() for m in str(row["Members"]).split(",") if m.strip()]
+        for _, row in communities_df.iterrows()
+    }
+    # keep only the 5 largest blocs for readability
+    bloc_members = dict(sorted(bloc_members.items(), key=lambda kv: -len(kv[1]))[:5])
+
+    years = sorted(df["year"].unique())
+    if len(years) < window:
+        return None, "Bloc Cohesion Streamgraph", "Not enough years in the selected range for a rolling window."
+
+    rows = []
+    for end_idx in range(window - 1, len(years)):
+        win_years = years[end_idx - window + 1: end_idx + 1]
+        win_df = df[df["year"].isin(win_years)]
+        for bloc, members in bloc_members.items():
+            sub = win_df[
+                win_df["src_label"].isin(members) & win_df["tgt_label"].isin(members)
+                & (win_df["src_label"] != win_df["tgt_label"])
+            ]
+            cohesion = float(sub["nvs_score_year"].mean()) if not sub.empty else 0.0
+            rows.append({"year": win_years[-1], "bloc": bloc, "cohesion": cohesion})
+
+    stream_df = pd.DataFrame(rows)
+    pivot = stream_df.pivot(index="year", columns="bloc", values="cohesion").fillna(0)
+
+    # Symmetric streamgraph baseline (wiggle = centred stack)
+    n_series = pivot.shape[1]
+    cumulative = pivot.cumsum(axis=1)
+    total = cumulative.iloc[:, -1]
+    baseline = -total / 2
+
+    fig = go.Figure()
+    palette = px_colors = [
+        "#E63946", "#2A9D8F", "#F4A261", "#457B9D", "#8338EC",
+    ]
+    running_base = baseline.copy()
+    for i, bloc in enumerate(pivot.columns):
+        top = running_base + pivot[bloc]
+        fig.add_trace(go.Scatter(
+            x=pivot.index, y=top, mode="lines",
+            line=dict(width=0.5, color=palette[i % len(palette)]),
+            fill="tonexty" if i > 0 else "tozeroy",
+            fillcolor=palette[i % len(palette)],
+            opacity=0.85,
+            name=bloc,
+            hovertemplate=f"{bloc}<br>Year %{{x}}<br>Cohesion (mean NVS): %{{customdata:.2f}}<extra></extra>",
+            customdata=pivot[bloc],
+        ))
+        running_base = top
+
+    fig.update_layout(
+        xaxis=dict(title=f"Year (rolling {window}-year window, right-aligned)"),
+        yaxis=dict(title="Internal bloc cohesion (stacked, centred)", showticklabels=False),
+        height=650, width=1050,
+        paper_bgcolor="white", plot_bgcolor="white",
+        legend_title_text="Bloc (fixed membership)",
+        margin=dict(l=40, r=40, t=20, b=60),
+    )
+
+    title = "Bloc Cohesion Streamgraph"
+    desc = (
+        f"**Metric:** bloc **membership is fixed** (from current community detection). "
+        f"For each rolling **{window}-year window**, recomputes the **mean mutual NVS "
+        f"within each bloc's existing members only**. Band thickness = cohesion in "
+        f"that window.\n\n"
+        "Unlike the Sankey (which shows membership migration) or Sunburst (which shows "
+        "top supporters), this isolates **how tightly a bloc votes together internally "
+        "over time**, even when its membership never changes — a bloc can stay intact "
+        "but drift from cohesive to fragmented."
+    )
+    return fig, title, desc
+
+
+def draft_genome_barcode(pdata: dict, id2label: dict):
+    """
+    DRAFT 5 — Eurovision Genome Barcode
+
+    Each country is a horizontal track; each year is one coloured tick:
+      white = country absent from the contest that year
+      teal  = country participated (active)
+      gold  = country WON that year
+    Countries are stacked top-to-bottom by total years active. Designed to
+    be readable as a poster from across a room (colour bands), while
+    rewarding close inspection (exact year-by-year patterns).
+    """
+    participants_by_year = pdata.get("participants_by_year", {})
+    final_standings = pdata.get("final_standings", pd.DataFrame())
+    years = pdata.get("years", [])
+
+    if not participants_by_year or not years:
+        return None, "Eurovision Genome Barcode", "No participation data available for the current filters."
+
+    winners_by_year = {}
+    if not final_standings.empty:
+        win_rows = final_standings[final_standings["is_winner"]]
+        winners_by_year = dict(zip(win_rows["year"], win_rows["country_id"].astype(str)))
+
+    all_ids = sorted(
+        set().union(*participants_by_year.values()) if participants_by_year else set()
+    )
+    active_count = {
+        cid: sum(1 for y in years if cid in participants_by_year.get(y, set()))
+        for cid in all_ids
+    }
+    ordered_ids = sorted(all_ids, key=lambda c: -active_count.get(c, 0))
+    ordered_labels = [id2label.get(c, c) for c in ordered_ids]
+
+    z = np.zeros((len(ordered_ids), len(years)))
+    for r, cid in enumerate(ordered_ids):
+        for c, yr in enumerate(years):
+            if cid in participants_by_year.get(yr, set()):
+                z[r, c] = 2.0 if winners_by_year.get(yr) == cid else 1.0
+            else:
+                z[r, c] = 0.0
+
+    colorscale = [
+        [0.00, "#ffffff"], [0.33, "#ffffff"],
+        [0.34, "#2A9D8F"], [0.66, "#2A9D8F"],
+        [0.67, "#F4D35E"], [1.00, "#F4D35E"],
+    ]
+
+    fig = go.Figure(go.Heatmap(
+        z=z, x=years, y=ordered_labels,
+        colorscale=colorscale, zmin=0, zmax=2,
+        showscale=False,
+        xgap=0.5, ygap=0.5,
+        hovertemplate="%{y} — %{x}<extra></extra>",
+    ))
+
+    cell_h = max(8, min(16, 700 // max(len(ordered_labels), 1)))
+    fig.update_layout(
+        height=max(500, len(ordered_labels) * cell_h + 150),
+        width=1200,
+        xaxis=dict(title="Year", dtick=5),
+        yaxis=dict(title="Country (sorted by total years active)", tickfont=dict(size=8)),
+        paper_bgcolor="white", plot_bgcolor="white",
+        margin=dict(l=160, r=20, t=20, b=60),
+    )
+
+    title = "Eurovision Genome Barcode"
+    desc = (
+        "**Encoding:** white = absent that year · teal = participated · "
+        "gold = **won** that year. Countries are stacked by **total years "
+        "active**, so the densest tracks (most consistent participants) sit "
+        "at the top.\n\n"
+        "This is the most information-dense static image of the set — readable "
+        "at a glance as coloured bands from across a room, while individual gold "
+        "ticks reward close inspection for exact win years."
+    )
+    return fig, title, desc
+
+
+# =============================================================================
 # SIDEBAR CONTROLS
 # =============================================================================
 
@@ -2122,18 +2809,33 @@ with st.sidebar:
         for c in all_country_ids
     ]
 
+    # Participation is now computed ONLY within the selected start_year/end_year
+    # window, so "25+ years" means 25+ years inside this range — not 25+ years
+    # across the full 1975-2025 dataset.
+    participation_counts = compute_participation_counts(start_year, end_year)
+
+    window_span = end_year - start_year + 1
+    max_possible_participation = min(
+        window_span,
+        int(max(participation_counts.values(), default=1))
+    )
+
     min_participation = st.slider(
         "Minimum participation years",
         min_value=1,
-        max_value=int(max(participation_counts.values(), default=1)),
-        value=5,
+        max_value=max(1, max_possible_participation),
+        value=min(5, max(1, max_possible_participation)),
         step=1,
-        help="Countries with fewer participation years than this are excluded from all charts and tables."
+        help=(
+            f"Countries with fewer participation years THAN THIS, "
+            f"WITHIN {start_year}–{end_year} ({window_span} years total), "
+            f"are excluded from all charts and tables."
+        )
     )
 
     filtered_labels = [
         lbl for lbl in all_labels_unfiltered
-        if participation_years_for_label(lbl) >= min_participation
+        if participation_years_for_label(lbl, participation_counts) >= min_participation
     ]
 
     st.caption(f"{len(filtered_labels)} / {len(all_labels_unfiltered)} countries pass this filter")
@@ -2709,6 +3411,14 @@ else:
         st.markdown("---")
         st.markdown("### Country voter drill-down")
         st.caption("Pick a country and year range from the sidebar to see the top 3 incoming voters as directed flows on the world map.")
+        st.info(
+            f"**Data scope:** all figures below are computed strictly from "
+            f"**{ROOT_START}–{ROOT_END}** Eurovision data. Years outside this "
+            f"window are not loaded into the app at all, so 'top voters' and "
+            f"'pair trend' results never reflect any Eurovision history before "
+            f"{ROOT_START} or after {ROOT_END}, even if such records exist in "
+            f"the source dataset."
+        )
 
         if drilldown_start_year > drilldown_end_year:
             st.error("Drill-down start year must be less than or equal to the end year.")
@@ -2724,7 +3434,11 @@ else:
                     st.info(f"No incoming voting flows found for {drilldown_country} in the selected years.")
                 else:
                     st.markdown("#### Top 3 voters")
-                    st.caption(f"Showing votes flowing into {drilldown_country} from {drilldown_start_year} to {drilldown_end_year}.")
+                    st.caption(
+                        f"Showing votes flowing into {drilldown_country} from "
+                        f"{drilldown_start_year} to {drilldown_end_year} "
+                        f"(within the app's fixed {ROOT_START}–{ROOT_END} scope)."
+                    )
                     st.dataframe(top_voters_df.round({"NVS (0–12)": 2, "Avg/year": 2}), use_container_width=True)
 
                     fig_country_map = make_directed_country_world_map_figure(
@@ -3064,9 +3778,27 @@ update_selected_pair_from_table(
 
 # =============================================================================
 # PAIR TREND ANALYSIS
+#
+# DATA SCOPE NOTE:
+# All series, statistics (mean/std/CV/slope/stability), and change-point
+# detection below are computed exclusively from `pdata`, which is built by
+# `compute_period_data(start_year, end_year)`. Both `start_year` and
+# `end_year` are restricted to the [ROOT_START, ROOT_END] = [1975, 2025]
+# window earlier in the sidebar. No year outside this fixed app-wide range
+# is ever loaded, aggregated, or plotted here — even if the source CSV
+# contains older or newer Eurovision contest data.
 # =============================================================================
 
 st.subheader("Pair trend analysis")
+
+st.info(
+    f"**Data scope:** this analysis only uses Eurovision data from "
+    f"**{ROOT_START} to {ROOT_END}** ({ROOT_END - ROOT_START + 1} contest years). "
+    f"All statistics below (mean NVS, stability, trend slope, relationship "
+    f"classification) describe behaviour strictly within that window — they "
+    f"do not reflect any voting history outside {ROOT_START}–{ROOT_END}, "
+    f"even if it exists elsewhere in the raw dataset."
+)
 
 requested_open = bool(st.session_state.pop("pair_trend_requested", False))
 
