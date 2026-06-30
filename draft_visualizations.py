@@ -1933,54 +1933,104 @@ def _bloc_mean_nvs_matrix(df: pd.DataFrame, countries: list) -> pd.DataFrame:
     return m
 
 
-def _bloc_top_extreme_pairs(mat: pd.DataFrame, countries: list, bloc_map: dict,
-                             top_n: int = 3) -> list:
+def _bloc_disparity_filter_pairs(mat: pd.DataFrame, countries: list, bloc_map: dict,
+                                  alpha: float = 0.05, max_total_edges: int | None = 30) -> list:
     """
-    Select the GLOBAL top `top_n` strongest cross-bloc relationships across
-    the entire panel — not "top-N per country". A genuinely condensed
-    static map shows only the handful of relationships that are actually
-    the most extreme in the whole picture (e.g. "the 3 strongest cross-bloc
-    ties in this era"), rather than guaranteeing every single country gets
-    a line regardless of how unremarkable its strongest tie is. This keeps
-    the edge count fixed and small (== top_n) no matter how many countries
-    are in the panel, which is what a static (non-interactive) poster
-    needs to stay legible.
+    DISPARITY FILTER (Serrano, Boguna & Vespignani, 2009, PNAS 106(16):
+    6483-6488) — selects edges that are statistically significant relative
+    to EACH country's own pattern of ties, rather than against one fixed
+    global rule (a fixed top-N, or a fixed value threshold).
 
-    Within-bloc pairs are excluded from consideration entirely, since bloc
-    membership is already shown through node colour.
+    The underlying network here is undirected: weight(A,B) is the same
+    representative strength already used for mutual/one-way classification
+    elsewhere in this draft, value(A,B) = max(NVS(A->B), NVS(B->A)). Only
+    cross-bloc pairs are considered at all (within-bloc ties are excluded
+    from the candidate set entirely — bloc membership is already shown
+    through node colour).
+
+    For a country A with k cross-bloc partners and total tie-strength
+    s = sum of weight(A, partner) across all of them, partner B's share is
+        p(A,B) = weight(A,B) / s
+    Under the null hypothesis that A's strength were spread uniformly at
+    random across its k partners, the probability of a partner ending up
+    with at least this large a share by chance is
+        alpha(A,B) = (1 - p(A,B)) ** (k - 1)
+    A small alpha(A,B) means the tie is too strong to be explained by
+    chance, given how many partners A has and how strong A's ties are
+    overall. A pair (A,B) survives if alpha(A,B) <= `alpha` from EITHER
+    endpoint's perspective (a relationship only needs to be significant to
+    one side to be worth showing). A country with degree 1 (a single
+    cross-bloc partner) is trivially significant for that one tie.
+
+    `max_total_edges` is a defensive cap (not part of the original
+    algorithm): if the disparity filter still returns more edges than this
+    for a given panel, only the most significant ones (lowest alpha) are
+    kept, since a static poster has a hard practical legibility ceiling
+    regardless of how principled the underlying selection is. Set to None
+    to disable the cap entirely.
     """
-    candidates = []
-    seen = set()
+    # Build the undirected cross-bloc weighted adjacency once.
+    weight = {c: {} for c in countries}
     for i, a in enumerate(countries):
         for j, b in enumerate(countries):
             if i >= j or bloc_map.get(a) == bloc_map.get(b):
                 continue
-            if (a, b) in seen:
-                continue
-            seen.add((a, b))
             ab = float(mat.loc[a, b]) if a in mat.index and b in mat.columns else 0.0
             ba = float(mat.loc[b, a]) if b in mat.index and a in mat.columns else 0.0
             v = max(ab, ba)
             if v > 0:
-                candidates.append((v, a, b))
+                weight[a][b] = v
+                weight[b][a] = v
 
-    candidates.sort(key=lambda t: t[0], reverse=True)
-    return [(a, b) for _, a, b in candidates[:top_n]]
+    def node_alpha(c: str, partner: str) -> float:
+        neighbors = weight.get(c, {})
+        k = len(neighbors)
+        if k == 0:
+            return 1.0
+        if k == 1:
+            return 0.0  # a country's only cross-bloc tie is trivially significant
+        s = sum(neighbors.values())
+        if s <= 0:
+            return 1.0
+        p = neighbors[partner] / s
+        return (1.0 - p) ** (k - 1)
+
+    candidates = []
+    seen = set()
+    for a in countries:
+        for b in weight.get(a, {}):
+            pair = tuple(sorted([a, b]))
+            if pair in seen:
+                continue
+            seen.add(pair)
+            alpha_ab = node_alpha(a, b)
+            alpha_ba = node_alpha(b, a)
+            best_alpha = min(alpha_ab, alpha_ba)
+            if best_alpha <= alpha:
+                candidates.append((best_alpha, pair[0], pair[1]))
+
+    candidates.sort(key=lambda t: t[0])  # most significant (lowest alpha) first
+
+    if max_total_edges is not None and len(candidates) > max_total_edges:
+        candidates = candidates[:max_total_edges]
+
+    return [(a, b) for _, a, b in candidates]
 
 
 def _bloc_classify_edges(mat: pd.DataFrame, countries: list, diff_threshold: float,
-                          bloc_map: dict, top_n: int = 3) -> list:
+                          bloc_map: dict, alpha: float = 0.05,
+                          max_total_edges: int | None = 30) -> list:
     """
-    Classify the panel's GLOBAL top `top_n` strongest cross-bloc
-    relationships (see _bloc_top_extreme_pairs) as MUTUAL
-    (|diff| <= diff_threshold) or ONE-WAY (otherwise, with an explicit
-    giver/receiver). Because every surviving edge is, by construction, a
-    cross-bloc tie among the panel's most extreme relationships, no
-    separate within/cross distinction or per-node guarantee is needed —
-    this function deliberately does NOT promise every country an edge; it
-    only ever draws what is genuinely the most extreme in the whole panel.
+    Classify the panel's statistically-significant cross-bloc relationships
+    (selected via the disparity filter, see _bloc_disparity_filter_pairs)
+    as MUTUAL (|diff| <= diff_threshold) or ONE-WAY (otherwise, with an
+    explicit giver/receiver). Every surviving edge is, by construction, a
+    cross-bloc tie that the disparity filter judged too strong to be
+    explained by chance for at least one of its two endpoints.
     """
-    retained_pairs = _bloc_top_extreme_pairs(mat, countries, bloc_map, top_n=top_n)
+    retained_pairs = _bloc_disparity_filter_pairs(
+        mat, countries, bloc_map, alpha=alpha, max_total_edges=max_total_edges
+    )
 
     edges = []
     for (a, b) in retained_pairs:
@@ -2004,6 +2054,7 @@ def _bloc_classify_edges(mat: pd.DataFrame, countries: list, diff_threshold: flo
                 "giver": giver, "receiver": receiver,
                 "value": max(ab, ba), "ab": ab, "ba": ba, "diff": diff,
             })
+
     return edges
 
 
@@ -2519,7 +2570,8 @@ def build_geo_bloc_migration_poster(
     hatred_min_years: int = 10,
     hatred_epsilon: float = 0.04,
     label_top_n: int = 12,
-    top_n_edges: int = 3,
+    disparity_alpha: float = 0.05,
+    max_edges_per_panel: int | None = 30,
 ):
     """
     DRAFT 8 — Geographic Bloc Migration Poster: a four-tier storyboard
@@ -2528,14 +2580,21 @@ def build_geo_bloc_migration_poster(
     non-interactive print legibility at Eurovision's small-country,
     geographically dense scale:
 
-    1. Each geographic map draws only the panel's GLOBAL top `top_n_edges`
-       (default 3) strongest cross-bloc relationships — not one edge per
-       country. A static poster with ~20-40 closely-packed European
-       countries cannot legibly show "every country's best tie" no matter
-       how that tie is chosen; the fix is to only ever show the handful of
-       relationships that are genuinely the most extreme in the whole
-       panel, fixing the edge count at top_n_edges regardless of how many
-       countries qualify.
+    1. Each geographic map draws only cross-bloc relationships that pass
+       the DISPARITY FILTER (Serrano, Boguna & Vespignani, 2009, PNAS
+       106(16): 6483-6488, see _bloc_disparity_filter_pairs) at
+       significance level `disparity_alpha` — i.e. ties that are
+       statistically too strong to be explained by chance, GIVEN EACH
+       COUNTRY'S OWN number of partners and overall tie-strength. This
+       replaces an earlier fixed "global top-N" rule: rather than always
+       keeping a hard-coded number of edges regardless of the data, the
+       filter adapts per country (a country with few partners needs a much
+       more lopsided relationship to "earn" significance than a country
+       with many), and no node is dropped outright unless literally none
+       of its ties are statistically distinguishable from random noise.
+       `max_edges_per_panel` is a defensive cap on top of the filter,
+       since a static poster still has a hard practical legibility
+       ceiling regardless of how principled the underlying selection is.
 
     2. Bloc MIGRATION — the thing a map's pairwise edges are worst at
        showing clearly in print — is moved to a dedicated slope/bump chart
@@ -2543,7 +2602,8 @@ def build_geo_bloc_migration_poster(
        bloc, with zero pairwise edges to select at all. This sidesteps the
        "which edges matter" problem entirely for the migration story,
        while the maps remain focused on what geography is actually good
-       for: showing bloc composition and the few standout relationships.
+       for: showing bloc composition and the few statistically significant
+       cross-bloc relationships.
 
     Two DIFFERENT qualification rules are used for the two map tiers:
       - Tier 1 (full 1975-2025 picture) includes any country with at least
@@ -2617,7 +2677,10 @@ def build_geo_bloc_migration_poster(
 
     full_mat = _bloc_mean_nvs_matrix(full_df, tier1_countries)
     full_bloc = _bloc_detect(full_df, tier1_countries)
-    full_edges = _bloc_classify_edges(full_mat, tier1_countries, diff_threshold, full_bloc, top_n=top_n_edges)
+    full_edges = _bloc_classify_edges(
+        full_mat, tier1_countries, diff_threshold, full_bloc,
+        alpha=disparity_alpha, max_total_edges=max_edges_per_panel,
+    )
 
     # -------------------------------------------------------------------
     # Tier 2 — two independently-detected eras (stricter both-halves cohort)
@@ -2650,8 +2713,14 @@ def build_geo_bloc_migration_poster(
     era2_mat = _bloc_mean_nvs_matrix(era2_df, era2_countries)
     era1_bloc = _bloc_detect(era1_df, era1_countries)
     era2_bloc = _bloc_detect(era2_df, era2_countries)
-    era1_edges = _bloc_classify_edges(era1_mat, era1_countries, diff_threshold, era1_bloc, top_n=top_n_edges)
-    era2_edges = _bloc_classify_edges(era2_mat, era2_countries, diff_threshold, era2_bloc, top_n=top_n_edges)
+    era1_edges = _bloc_classify_edges(
+        era1_mat, era1_countries, diff_threshold, era1_bloc,
+        alpha=disparity_alpha, max_total_edges=max_edges_per_panel,
+    )
+    era2_edges = _bloc_classify_edges(
+        era2_mat, era2_countries, diff_threshold, era2_bloc,
+        alpha=disparity_alpha, max_total_edges=max_edges_per_panel,
+    )
 
     migrated = _bloc_flag_migrated(era1_bloc, era2_bloc)
 
@@ -2860,15 +2929,21 @@ rather than an artifact of a country barely appearing in one half.
 are actually plotted in it, so non-European participants such as Australia
 or Israel are never silently clipped off when they qualify.
 
-**Condensation on the maps — global top {top_n_edges}, not per-country:**
-each map draws only the **{top_n_edges} strongest cross-bloc relationships
-in the whole panel**, found by comparing every qualifying pair and keeping
-only the most extreme ones overall. This is a deliberate move away from
-guaranteeing every country an edge (which previously meant the edge count
-scaled with the number of countries, defeating the point of condensation) —
-now the edge count is fixed at {top_n_edges} regardless of how many
-countries are shown. Within-bloc pairs are excluded from consideration
-entirely, since bloc membership is already shown through node colour.
+**Condensation on the maps — disparity filter, not a fixed top-N:** each
+map draws only cross-bloc relationships that pass the **disparity filter**
+(Serrano, Boguna & Vespignani, 2009, PNAS 106(16): 6483-6488) at
+significance level **α = {disparity_alpha}**. For a country with `k`
+cross-bloc partners and total tie-strength `s`, a partner's tie is kept if
+its share of `s` is too large to be explained by a uniform-random split of
+`s` across `k` partners. This adapts per country — one with few partners
+needs a much more lopsided relationship to "earn" significance than one
+with many — rather than forcing every panel to show exactly the same fixed
+number of edges regardless of how the underlying data actually looks. A
+defensive cap of **{max_edges_per_panel} edges per panel** is applied on
+top of the filter (keeping the most significant ones first) purely for
+print legibility, independent of the statistical method itself. Within-bloc
+pairs are excluded from consideration entirely, since bloc membership is
+already shown through node colour.
 
 **Edge encoding:** `|NVS(A→B) − NVS(B→A)| ≤ {diff_threshold}` → drawn as a
 **solid line** (mutual); otherwise a **dashed line** (one-way), with the
@@ -2905,11 +2980,15 @@ pairs), top one-way voters (largest asymmetry among pairs that still
 exchange votes), and cold-shoulder pairs (a country giving essentially zero
 NVS to another across at least {hatred_min_years} eligible years, computed
 from a dedicated eligibility frame). These are computed from the full,
-unfiltered data — never affected by the map's top-{top_n_edges} condensation.
+unfiltered data — never affected by the map's disparity-filter condensation.
 
-All thresholds above ({diff_threshold}, {hatred_epsilon}, {hatred_min_years}
-years, {min_years}/{min_years_per_half} years, top-{top_n_edges} edges per
-map) are exploratory cutoffs chosen for visual and narrative clarity, not
-formal statistical tests.
+The disparity filter's significance level (**α = {disparity_alpha}**) and
+the defensive edge cap ({max_edges_per_panel}) are the only tunable
+parameters governing which edges appear; everything else they select is
+determined by the statistical test itself, not by an arbitrary visual
+cutoff. The remaining thresholds — {diff_threshold} for mutual/one-way,
+{hatred_epsilon} for cold-shoulder, {min_years}/{min_years_per_half} years
+for the two qualification rules — remain exploratory cutoffs chosen for
+visual and narrative clarity, not formal statistical tests.
 """
     return fig, "Geographic Bloc Migration Poster", explanation
