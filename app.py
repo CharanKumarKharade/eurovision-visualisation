@@ -791,7 +791,7 @@ st.info(
 # DRAFT VISUALISATION GALLERY  (Graph Drawing Contest 2026 poster drafts)
 #
 # This section lets a reader jump from the main exploratory app into any of
-# five standalone "draft" visualisations (built in draft_visualizations.py),
+# six standalone "draft" visualisations (built in draft_visualizations.py),
 # each exploring a different, non-overlapping angle on the same 1975-2025
 # NVS dataset. Selecting a draft below REPLACES the rest of the app for
 # this run — a "Back to main app" button returns to the normal dashboard.
@@ -809,6 +809,9 @@ DRAFT_REGISTRY = {
     "3. Alliance Lifespan Arcs":                 "lifespan_arcs",
     "4. Rise and Fall — Era Dominance":          "rise_and_fall",
     "5. Voting Hall of Fame":                    "hall_of_fame",
+    "6. Bloc Migration Sankey":                  "bloc_migration_sankey",
+    "7. Hierarchical Bloc Structure (Storyboard)": "hierarchical_bloc_poster",
+     "8. Geographic Bloc Migration Poster":       "geo_bloc_migration_poster",
 }
 
 if "active_draft" not in st.session_state:
@@ -818,7 +821,7 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### 🎨 Draft visualisations (GD Contest 2026)")
     st.caption(
-        "Five standalone poster-draft diagrams, each using a different "
+        "Six standalone poster-draft diagrams, each using a different "
         "analytical lens on the same 1975–2025 NVS data. Pick one to view "
         "it full-page; use 'Back to main app' there to return here."
     )
@@ -898,6 +901,22 @@ if st.session_state.get("active_draft") is not None:
                 draft_df_full, id2label, min_years=15
             )
 
+        elif _draft_key == "bloc_migration_sankey":
+            fig, title, explanation = draftviz.build_bloc_migration_sankey(
+                draft_df_full, id2label, min_years=25, affinity_q=0.65
+            )
+
+        elif _draft_key == "hierarchical_bloc_poster":        
+            fig, title, explanation = draftviz.build_hierarchical_bloc_poster(
+                draft_df_full, id2label, nodes, min_years=10
+            )
+
+        elif _draft_key == "geo_bloc_migration_poster":
+            fig, title, explanation = draftviz.build_geo_bloc_migration_poster(
+        draft_df_full, id2label, nodes
+        # min_years=15, min_years_per_half=5, edges_per_node=3 are now the defaults
+    )
+        
         else:
             fig, title, explanation = None, "Unknown draft", "Unknown draft key."
 
