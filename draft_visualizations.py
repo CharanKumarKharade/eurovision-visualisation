@@ -1343,7 +1343,8 @@ def build_hierarchical_bloc_poster(
     diff_threshold: float = 1.0,
     hatred_min_years: int = 10,
     hatred_epsilon: float = 0.04,
-    top_k_per_country: int = 3,
+    top_k_out: int = 3,
+    min_nvs_strength: float = 2.0,
 ):
     """
     DRAFT 7 — Hierarchical Bloc Structure: a storyboard poster showing
@@ -1351,6 +1352,14 @@ def build_hierarchical_bloc_poster(
     (1975-1999 / 2000-2025) with bloc-migration highlighting, then
     concrete per-era evidence (top mutual voters, top one-way voters,
     cold-shoulder pairs).
+
+    Edge selection: for each country A, the `top_k_out` strongest outgoing
+    NVS relationships (NVS(A→B) on the 0-12 scale, ranked and kept only if
+    NVS >= min_nvs_strength) are selected. A pair survives if it qualifies
+    from EITHER country's outgoing perspective. Classification then asks:
+    if |NVS(A→B) - NVS(B→A)| <= diff_threshold, the pair is MUTUAL
+    (roughly reciprocal); otherwise it is ONE-WAY, with an arrow pointing
+    toward whichever country receives the stronger vote.
 
     Returns (figure, title, explanation_markdown) per the module's
     standard contract.
@@ -1378,8 +1387,7 @@ def build_hierarchical_bloc_poster(
         )
 
     # -------------------------------------------------------------------
-    # Shared helpers (local to this builder, deliberately self-contained
-    # so this draft does not depend on the main app's session state)
+    # Shared helpers
     # -------------------------------------------------------------------
 
     def mean_nvs_matrix(sub_df, countries):
@@ -1389,96 +1397,67 @@ def build_hierarchical_bloc_poster(
             sub_df.groupby(["src_label", "tgt_label"])["nvs"].mean()
             .unstack(fill_value=0)
             .reindex(index=countries, columns=countries, fill_value=0)
-        ) * 12.0  # display on the familiar 0-12 NVS scale
+        ) * 12.0
         return m
 
-    def top_k_backbone(mat, countries, k=top_k_per_country):
+    def nvs_strength_backbone(mat, countries):
         """
-        Noise-reduction step (k-NN backbone extraction): instead of keeping
-        every directed relationship, keep only the directed edges A->B such
-        that B is among A's top-k strongest OUTGOING ties (A gives B the
-        most NVS among everyone A votes for) OR A is among B's top-k
-        strongest INCOMING ties (A is one of the top-k countries that B
-        receives the most NVS from). A pair is kept if either direction
-        survives either of these two rules ("mutual k-NN" union) — this
-        guarantees every country's most meaningful ties stay visible, even
-        if its partner has many other strong relationships competing for
-        a spot in their own top-k.
+        For each country A, select its top `top_k_out` outgoing relationships
+        where NVS(A→B) >= min_nvs_strength (on the 0-12 scale). A pair
+        survives if it qualifies from EITHER endpoint's outgoing perspective.
 
-        This caps the network at roughly 3k-6k edges per country instead
-        of up to N^2, which is what actually keeps the poster readable as
-        a node-link diagram. It mirrors the rationale in the readability
-        literature on node-link vs matrix representations: very dense
-        directed graphs need active pruning (or a different chart type)
-        once N grows past a few dozen nodes.
-
-        NOTE: filtering happens on raw directed NVS magnitude, BEFORE
-        mutual/one-way classification, so the surviving pairs are then
-        classified using their full original A->B and B->A values
-        (never zeroed out) by classify_edges() as normal.
+        This directly answers "which relationships are strong enough to matter?"
+        rather than relying on a statistical test or a purely structural rule.
+        The NVS threshold (min_nvs_strength) sets the minimum meaningful voting
+        strength — e.g. 2.0/12 means A gives B at least 2 points worth of NVS
+        on average, which is roughly equivalent to consistently giving 2–3 points
+        per year in the jury-only era or 4–6 points in the combined era.
         """
         keep = set()
         for c in countries:
             out_vals = mat.loc[c].drop(labels=[c], errors="ignore")
-            in_vals = mat[c].drop(labels=[c], errors="ignore")
+            strong_out = (
+                out_vals[out_vals >= min_nvs_strength]
+                .sort_values(ascending=False)
+                .head(top_k_out)
+            )
+            for partner in strong_out.index:
+                keep.add(tuple(sorted([c, partner])))
+        return keep
 
-            top_out = out_vals[out_vals > 0].sort_values(ascending=False).head(k)
-            top_in = in_vals[in_vals > 0].sort_values(ascending=False).head(k)
-
-            for partner in top_out.index:
-                keep.add((c, partner))
-            for partner in top_in.index:
-                keep.add((partner, c))
-
-        retained_pairs = set()
-        for (x, y) in keep:
-            retained_pairs.add(tuple(sorted([x, y])))
-
-        return retained_pairs
-
-    def classify_edges(mat, countries, apply_backbone=True):
-        retained_pairs = (
-            top_k_backbone(mat, countries, k=top_k_per_country)
-            if apply_backbone else None
-        )
-
+    def classify_edges(mat, countries):
+        retained_pairs = nvs_strength_backbone(mat, countries)
         edges = []
-        for i, a in enumerate(countries):
-            for j, b in enumerate(countries):
-                if i >= j:
-                    continue
-                if retained_pairs is not None and (a, b) not in retained_pairs:
-                    continue
-                ab = float(mat.loc[a, b])
-                ba = float(mat.loc[b, a])
-                if ab <= 0 and ba <= 0:
-                    continue
-                diff = abs(ab - ba)
-                if diff <= diff_threshold:
-                    edges.append({
-                        "a": a, "b": b, "kind": "mutual",
-                        "value": (ab + ba) / 2.0, "ab": ab, "ba": ba, "diff": diff,
-                    })
+        for (a, b) in retained_pairs:
+            ab = float(mat.loc[a, b])
+            ba = float(mat.loc[b, a])
+            if ab <= 0 and ba <= 0:
+                continue
+            diff = abs(ab - ba)
+            if diff <= diff_threshold:
+                edges.append({
+                    "a": a, "b": b, "kind": "mutual",
+                    "value": (ab + ba) / 2.0, "ab": ab, "ba": ba, "diff": diff,
+                })
+            else:
+                if ab > ba:
+                    giver, receiver = a, b
                 else:
-                    if ab > ba:
-                        giver, receiver = a, b
-                    else:
-                        giver, receiver = b, a
-                    edges.append({
-                        "a": a, "b": b, "kind": "one_way",
-                        "giver": giver, "receiver": receiver,
-                        "value": max(ab, ba), "ab": ab, "ba": ba, "diff": diff,
-                    })
+                    giver, receiver = b, a
+                edges.append({
+                    "a": a, "b": b, "kind": "one_way",
+                    "giver": giver, "receiver": receiver,
+                    "value": max(ab, ba), "ab": ab, "ba": ba, "diff": diff,
+                })
         return edges
 
-
     def edge_color(value, cross_bloc=False):
-        base = (200, 60, 60) if cross_bloc else (11, 60, 111)
+        base = (180, 40, 40) if cross_bloc else (11, 60, 111)
         value = max(value, 0.0)
         if value < 1.0:
-            alpha = 0.10 + 0.20 * value
+            alpha = 0.10 + 0.18 * value
         else:
-            alpha = 0.35 + 0.55 * min((value - 1.0) / 11.0, 1.0)
+            alpha = 0.32 + 0.58 * min((value - 1.0) / 11.0, 1.0)
         r, g, b = base
         return f"rgba({r},{g},{b},{alpha:.2f})"
 
@@ -1514,7 +1493,6 @@ def build_hierarchical_bloc_poster(
                         rows.append((yr, s, t))
         if not rows:
             return pd.DataFrame(columns=["year", "src_label", "tgt_label", "points", "nvs"])
-
         elig = pd.DataFrame(rows, columns=["year", "src_label", "tgt_label"])
         actual = sub_df.groupby(["year", "src_label", "tgt_label"], as_index=False)["points"].sum()
         merged = elig.merge(actual, on=["year", "src_label", "tgt_label"], how="left")
@@ -1526,14 +1504,11 @@ def build_hierarchical_bloc_poster(
     def era_stats(sub_df, countries, edges):
         mutual = [e for e in edges if e["kind"] == "mutual"]
         one_way = [e for e in edges if e["kind"] == "one_way"]
-
         top_mutual = sorted(mutual, key=lambda e: e["value"], reverse=True)[:3]
         top_oneway = sorted(one_way, key=lambda e: e["diff"], reverse=True)[:3]
-
         elig = eligibility_frame(sub_df, countries)
         if elig.empty:
             return top_mutual, top_oneway, pd.DataFrame()
-
         agg = (
             elig.groupby(["src_label", "tgt_label"])
             .agg(years_eligible=("year", "nunique"), mean_nvs=("nvs", "mean"))
@@ -1547,7 +1522,6 @@ def build_hierarchical_bloc_poster(
         ].copy()
         if candidates.empty:
             return top_mutual, top_oneway, candidates
-
         candidates["reciprocal_nvs"] = candidates.apply(
             lambda r: reciprocal_lookup.get((r["tgt_label"], r["src_label"]), 0.0), axis=1
         )
@@ -1561,8 +1535,18 @@ def build_hierarchical_bloc_poster(
         "#6a4c93", "#7f5539", "#577590", "#3a86ff",
     ]
 
-    def render_network(fig, row, col, countries, edges, bloc_map, migrated=None):
+    def render_network(fig, row, col, countries, edges, bloc_map, migrated=None,
+                       participation_years=None, label_top_n=14):
+        """
+        Render one network panel with:
+        - Node size driven by participation years (if provided) else uniform
+        - Only top `label_top_n` nodes (by years participated) get labels
+        - Mutual edges as solid lines, one-way as dashed + triangle marker
+        - Cross-bloc edges at full opacity/width, within-bloc muted
+        - Bloc color legend added as shape+annotation in the subplot area
+        """
         migrated = migrated or set()
+        participation_years = participation_years or {}
 
         if not countries:
             fig.update_xaxes(visible=False, row=row, col=col)
@@ -1573,28 +1557,32 @@ def build_hierarchical_bloc_poster(
         G.add_nodes_from(countries)
         for e in edges:
             G.add_edge(e["a"], e["b"], weight=max(e["value"], 0.01))
-        pos = nx.spring_layout(G, weight="weight", seed=7, k=0.9)
+        pos = nx.spring_layout(G, weight="weight", seed=42, k=1.1, iterations=60)
 
         bloc_names = sorted(set(bloc_map.values())) if bloc_map else []
         bloc_color = {b: BLOC_NODE_PALETTE[i % len(BLOC_NODE_PALETTE)] for i, b in enumerate(bloc_names)}
 
+        # --- edges ---
         for e in edges:
             x0, y0 = pos[e["a"]]
             x1, y1 = pos[e["b"]]
             cross = bloc_map.get(e["a"]) != bloc_map.get(e["b"])
             color = edge_color(e["value"], cross_bloc=cross)
-            width = (1.3 if not cross else 2.4) + 4.0 * min(e["value"] / 12.0, 1.0)
+            width = (1.2 if not cross else 2.2) + 3.5 * min(e["value"] / 12.0, 1.0)
             if not cross:
-                width *= 0.45  # within-bloc edges deliberately muted/thin
+                width *= 0.4
 
+            dash = "solid" if e["kind"] == "mutual" else "dash"
+
+            kind_str = "Mutual" if e["kind"] == "mutual" else f"One-way: {e['giver']} \u2192 {e['receiver']}"
+            cross_str = "Cross-bloc ⚡" if cross else "Within-bloc"
             fig.add_trace(go.Scatter(
                 x=[x0, x1], y=[y0, y1], mode="lines",
-                line=dict(color=color, width=width),
+                line=dict(color=color, width=width, dash=dash),
                 hovertemplate=(
                     f"<b>{e['a']}</b> ↔ <b>{e['b']}</b><br>"
-                    f"{e['a']}→{e['b']}: {e['ab']:.2f} | {e['b']}→{e['a']}: {e['ba']:.2f}<br>"
-                    f"{'Mutual' if e['kind']=='mutual' else 'One-way'} · "
-                    f"{'Cross-bloc' if cross else 'Within-bloc'}<extra></extra>"
+                    f"NVS {e['a']}→{e['b']}: {e['ab']:.2f} | {e['b']}→{e['a']}: {e['ba']:.2f}<br>"
+                    f"{kind_str} · {cross_str}<extra></extra>"
                 ),
                 showlegend=False,
             ), row=row, col=col)
@@ -1602,36 +1590,49 @@ def build_hierarchical_bloc_poster(
             if e["kind"] == "one_way":
                 gx, gy = pos[e["giver"]]
                 rx, ry = pos[e["receiver"]]
-                t = 0.82
+                t = 0.75
                 mx, my = gx + t * (rx - gx), gy + t * (ry - gy)
                 ang = float(np.degrees(np.arctan2(ry - gy, rx - gx)))
                 fig.add_trace(go.Scatter(
                     x=[mx], y=[my], mode="markers",
                     marker=dict(
                         symbol="triangle-right",
-                        size=8 + 3 * min(e["value"] / 12.0, 1.0),
+                        size=7 + 3 * min(e["value"] / 12.0, 1.0),
                         color=color, angle=ang,
                         line=dict(width=0.5, color="white"),
                     ),
                     hoverinfo="skip", showlegend=False,
                 ), row=row, col=col)
 
+        # --- nodes ---
+        max_years = max(participation_years.values(), default=1) or 1
+        labelled = set(
+            sorted(countries, key=lambda c: participation_years.get(c, 0), reverse=True)[:label_top_n]
+        )
+
         node_x = [pos[c][0] for c in countries]
         node_y = [pos[c][1] for c in countries]
         node_color = [bloc_color.get(bloc_map.get(c), "#9ca3af") for c in countries]
         node_line_color = ["#facc15" if c in migrated else "white" for c in countries]
-        node_line_width = [3 if c in migrated else 1 for c in countries]
+        node_line_width = [3.5 if c in migrated else 1.2 for c in countries]
+        node_size = [
+            11 + 10 * np.sqrt(max(participation_years.get(c, max_years // 2), 0) / max_years)
+            for c in countries
+        ]
+        node_text = [c if c in labelled else "" for c in countries]
 
         fig.add_trace(go.Scatter(
             x=node_x, y=node_y, mode="markers+text",
-            text=countries, textposition="top center", textfont=dict(size=8),
+            text=node_text, textposition="top center",
+            textfont=dict(size=9, color="#111827"),
             marker=dict(
-                size=12, color=node_color,
+                size=node_size, color=node_color,
                 line=dict(width=node_line_width, color=node_line_color),
             ),
             hovertext=[
-                f"{c}<br>Bloc: {bloc_map.get(c, 'NA')}"
-                + ("<br><b>Migrated bloc since last era</b>" if c in migrated else "")
+                f"<b>{c}</b><br>Bloc: {bloc_map.get(c, 'NA')}<br>"
+                f"Years participated: {participation_years.get(c, '?')}"
+                + ("<br><b>⚡ Changed bloc between eras</b>" if c in migrated else "")
                 for c in countries
             ],
             hovertemplate="%{hovertext}<extra></extra>",
@@ -1641,39 +1642,41 @@ def build_hierarchical_bloc_poster(
         fig.update_xaxes(visible=False, row=row, col=col)
         fig.update_yaxes(visible=False, row=row, col=col)
 
+        # live edge/node count subtitle
+        n_mutual = sum(1 for e in edges if e["kind"] == "mutual")
+        n_oneway = len(edges) - n_mutual
+        return f"{len(countries)} countries · {len(edges)} edges ({n_mutual} mutual ─, {n_oneway} one-way ╌)"
+
     def render_stat_panel(fig, row, col, era_label, top_mutual, top_oneway, top_hatred):
         fig.update_xaxes(visible=False, range=[0, 1], row=row, col=col)
         fig.update_yaxes(visible=False, range=[0, 1], row=row, col=col)
 
         mutual_lines = [
-            f"{e['a']} ↔ {e['b']}  (NVS {e['value']:.1f})" for e in top_mutual
+            f"🤝 {e['a']} ↔ {e['b']}  (NVS {e['value']:.1f})" for e in top_mutual
         ] or ["No qualifying mutual pairs"]
-
         oneway_lines = [
-            f"{e['giver']} → {e['receiver']}  (Δ{e['diff']:.1f})" for e in top_oneway
+            f"➡️ {e['giver']} → {e['receiver']}  (gap Δ{e['diff']:.1f})" for e in top_oneway
         ] or ["No qualifying one-way pairs"]
-
         if top_hatred is None or top_hatred.empty:
             hatred_lines = ["No sustained cold-shoulder pairs found"]
         else:
             hatred_lines = [
-                f"{r['src_label']} ⇏ {r['tgt_label']}  ({int(r['years_eligible'])} yrs eligible)"
+                f"❄️ {r['src_label']} ⇏ {r['tgt_label']}  ({int(r['years_eligible'])} eligible yrs)"
                 for _, r in top_hatred.iterrows()
             ]
 
         sections = [
-            ("🤝 Top mutual voters", mutual_lines),
-            ("➡️ Top one-way voters", oneway_lines),
-            ("❄️ Cold-shoulder pairs", hatred_lines),
+            ("Top mutual voters (NVS ≈ equal both ways)", mutual_lines),
+            ("Top one-way voters (strong asymmetry)", oneway_lines),
+            ("Cold-shoulder pairs (near-zero NVS despite eligibility)", hatred_lines),
         ]
-
         y = 0.95
         fig.add_annotation(
             x=0.03, y=1.0, text=f"<b>{era_label}</b>", showarrow=False,
             font=dict(size=13, color="#1f2937", family="Georgia, serif"),
             xanchor="left", yanchor="top", row=row, col=col,
         )
-        y -= 0.13
+        y -= 0.12
         for heading, lines in sections:
             fig.add_annotation(
                 x=0.03, y=y, text=f"<b>{heading}</b>", showarrow=False,
@@ -1683,20 +1686,39 @@ def build_hierarchical_bloc_poster(
             y -= 0.09
             for line in lines[:3]:
                 fig.add_annotation(
-                    x=0.07, y=y, text=line, showarrow=False,
+                    x=0.06, y=y, text=line, showarrow=False,
                     font=dict(size=9, color="#4b5563"),
                     xanchor="left", yanchor="top", row=row, col=col,
                 )
-                y -= 0.075
-            y -= 0.025
+                y -= 0.08
+            y -= 0.02
+
+    # -------------------------------------------------------------------
+    # Participation years lookup (drives node size consistently)
+    # -------------------------------------------------------------------
+
+    participation_total = participation.to_dict()
+
+    era1_participation = (
+        pd.concat([
+            df[df["year"] <= 1999][["year", "src_label"]].rename(columns={"src_label": "country"}),
+            df[df["year"] <= 1999][["year", "tgt_label"]].rename(columns={"tgt_label": "country"}),
+        ]).drop_duplicates().groupby("country")["year"].nunique().to_dict()
+    )
+    era2_participation = (
+        pd.concat([
+            df[df["year"] >= 2000][["year", "src_label"]].rename(columns={"src_label": "country"}),
+            df[df["year"] >= 2000][["year", "tgt_label"]].rename(columns={"tgt_label": "country"}),
+        ]).drop_duplicates().groupby("country")["year"].nunique().to_dict()
+    )
 
     # -------------------------------------------------------------------
     # Tier 1 — full history
     # -------------------------------------------------------------------
 
     full_mat = mean_nvs_matrix(df, qualified)
-    full_edges = classify_edges(full_mat, qualified)
     full_bloc = detect(df, qualified)
+    full_edges = classify_edges(full_mat, qualified)
 
     # -------------------------------------------------------------------
     # Tier 2 — two independently-detected eras
@@ -1716,10 +1738,10 @@ def build_hierarchical_bloc_poster(
 
     era1_mat = mean_nvs_matrix(era1_df, era1_countries)
     era2_mat = mean_nvs_matrix(era2_df, era2_countries)
-    era1_edges = classify_edges(era1_mat, era1_countries)
-    era2_edges = classify_edges(era2_mat, era2_countries)
     era1_bloc = detect(era1_df, era1_countries)
     era2_bloc = detect(era2_df, era2_countries)
+    era1_edges = classify_edges(era1_mat, era1_countries)
+    era2_edges = classify_edges(era2_mat, era2_countries)
 
     migrated = flag_migrated(era1_bloc, era2_bloc)
 
@@ -1731,12 +1753,11 @@ def build_hierarchical_bloc_poster(
     top_mutual_2, top_oneway_2, top_hatred_2 = era_stats(era2_df, era2_countries, era2_edges)
 
     # -------------------------------------------------------------------
-    # Figure assembly — three storyboard tiers, connected only by
-    # dotted flow annotations drawn in paper coordinates afterward.
+    # Figure assembly
     # -------------------------------------------------------------------
 
     row_heights = [0.40, 0.34, 0.26]
-    vspacing = 0.10
+    vspacing = 0.09
     total_gap = vspacing * (len(row_heights) - 1)
     avail = 1.0 - total_gap
     scaled = [h * avail for h in row_heights]
@@ -1747,6 +1768,16 @@ def build_hierarchical_bloc_poster(
         bottom = top_cursor - h
         boundaries.append((top_cursor, bottom))
         top_cursor = bottom - vspacing
+
+    def _panel_title(prefix, countries, edges):
+        n_m = sum(1 for e in edges if e["kind"] == "mutual")
+        n_o = len(edges) - n_m
+        return (
+            f"{prefix}<br>"
+            f"<span style='font-size:11px;color:#6b7280;'>"
+            f"{len(countries)} countries · {len(edges)} edges "
+            f"({n_m} mutual ─, {n_o} one-way ╌)</span>"
+        )
 
     fig = make_subplots(
         rows=3, cols=2,
@@ -1759,41 +1790,34 @@ def build_hierarchical_bloc_poster(
             [{}, {}],
         ],
         subplot_titles=[
-            "Full picture · 1975–2025",
-            "Era 1 · 1975–1999", "Era 2 · 2000–2025",
-            "Era 1 evidence", "Era 2 evidence",
+            _panel_title("Full picture · 1975–2025", qualified, full_edges),
+            _panel_title("Era 1 · 1975–1999", era1_countries, era1_edges),
+            _panel_title("Era 2 · 2000–2025", era2_countries, era2_edges),
+            "Era 1 insights", "Era 2 insights",
         ],
     )
 
-    render_network(fig, 1, 1, qualified, full_edges, full_bloc)
-    render_network(fig, 2, 1, era1_countries, era1_edges, era1_bloc, migrated=migrated)
-    render_network(fig, 2, 2, era2_countries, era2_edges, era2_bloc, migrated=migrated)
+    render_network(fig, 1, 1, qualified, full_edges, full_bloc,
+                   participation_years=participation_total)
+    render_network(fig, 2, 1, era1_countries, era1_edges, era1_bloc,
+                   migrated=migrated, participation_years=era1_participation)
+    render_network(fig, 2, 2, era2_countries, era2_edges, era2_bloc,
+                   migrated=migrated, participation_years=era2_participation)
     render_stat_panel(fig, 3, 1, "1975–1999", top_mutual_1, top_oneway_1, top_hatred_1)
     render_stat_panel(fig, 3, 2, "2000–2025", top_mutual_2, top_oneway_2, top_hatred_2)
 
-    # ---- dotted flow connectors between tiers (paper coordinates) -----
-    #
-    # IMPORTANT: showarrow=True annotations require axref/ayref, and those
-    # properties never accept "paper" as a value in Plotly (only "pixel"
-    # or an axis id like "x"/"x2"). To stay purely in paper coordinates,
-    # this helper avoids showarrow entirely: the dotted shaft is a shape,
-    # and the arrowhead is a plain centred "▼" text annotation.
+    # ---- dotted flow connectors ----------------------------------------
 
     def add_flow_connector(x, y_top, y_bottom, label):
-        # Dotted shaft between tiers
         fig.add_shape(
             type="line", x0=x, y0=y_top - 0.005, x1=x, y1=y_bottom + 0.022,
             line=dict(dash="dot", color="#9ca3af", width=2),
             xref="paper", yref="paper",
         )
-        # Arrowhead drawn as plain text (avoids axref/ayref entirely)
         fig.add_annotation(
-            x=x, y=y_bottom + 0.018, text="▼",
-            showarrow=False,
-            xref="paper", yref="paper",
-            font=dict(size=14, color="#9ca3af"),
+            x=x, y=y_bottom + 0.018, text="▼", showarrow=False,
+            xref="paper", yref="paper", font=dict(size=14, color="#9ca3af"),
         )
-        # Connector label, centred in the gap
         fig.add_annotation(
             x=x, y=(y_top + y_bottom) / 2, text=label,
             showarrow=False, xref="paper", yref="paper",
@@ -1803,87 +1827,113 @@ def build_hierarchical_bloc_poster(
 
     gap1_top, gap1_bottom = boundaries[0][1], boundaries[1][0]
     gap2_top, gap2_bottom = boundaries[1][1], boundaries[2][0]
-
     add_flow_connector(0.25, gap1_top, gap1_bottom, "splits into two eras")
     add_flow_connector(0.75, gap1_top, gap1_bottom, "splits into two eras")
     add_flow_connector(0.25, gap2_top, gap2_bottom, "reveals evidence")
     add_flow_connector(0.75, gap2_top, gap2_bottom, "reveals evidence")
 
-    # ---- legend explaining the visual grammar --------------------------
+    # ---- bloc legend (computed from full-history detection) -----------
+    bloc_names_full = sorted(set(full_bloc.values()))
+    BLOC_NODE_PALETTE_L = BLOC_NODE_PALETTE
+    bloc_col = {b: BLOC_NODE_PALETTE_L[i % len(BLOC_NODE_PALETTE_L)] for i, b in enumerate(bloc_names_full)}
+    members_by_bloc = defaultdict(list)
+    for c, b in full_bloc.items():
+        members_by_bloc[b].append(c)
 
+    legend_x, legend_y = 0.01, 0.275
     fig.add_annotation(
-        x=0.99, y=1.045, xref="paper", yref="paper",
+        x=legend_x, y=legend_y + 0.02,
+        text="<b>Detected blocs (1975–2025)</b>",
+        xref="paper", yref="paper", showarrow=False,
+        font=dict(size=9, color="#374151"), xanchor="left",
+    )
+    for idx, bname in enumerate(bloc_names_full):
+        col_hex = bloc_col[bname]
+        members_str = ", ".join(sorted(members_by_bloc[bname])[:6])
+        if len(members_by_bloc[bname]) > 6:
+            members_str += f" +{len(members_by_bloc[bname])-6}"
+        fig.add_shape(
+            type="rect",
+            x0=legend_x, y0=legend_y - idx * 0.028 - 0.005,
+            x1=legend_x + 0.012, y1=legend_y - idx * 0.028 + 0.015,
+            fillcolor=col_hex, line=dict(width=0),
+            xref="paper", yref="paper",
+        )
+        fig.add_annotation(
+            x=legend_x + 0.016, y=legend_y - idx * 0.028 + 0.005,
+            text=f"<b>{bname}</b>: {members_str}",
+            xref="paper", yref="paper", showarrow=False,
+            font=dict(size=8, color="#374151"), xanchor="left", yanchor="middle",
+        )
+
+    # ---- reading guide annotation -------------------------------------
+    fig.add_annotation(
+        x=0.99, y=1.048, xref="paper", yref="paper",
         text=(
-            "<b>Reading guide:</b> line = mutual NVS · triangle = one-way (points toward receiver) · "
-            "darker/thicker = stronger (NVS ≥ 1.0 anchor) · red tint = crosses a bloc boundary · "
-            "<span style='color:#b45309'><b>gold outline</b></span> = country changed bloc between eras"
+            "<b>Reading guide:</b> "
+            "solid line ─ = mutual (NVS similar both ways)  ·  "
+            "dashed line ╌ + ▶ = one-way (arrow toward receiver)  ·  "
+            "darker/thicker = stronger NVS  ·  "
+            "red tint = cross-bloc  ·  "
+            "<b style='color:#b45309'>gold ring</b> = changed bloc between eras  ·  "
+            "node size = years participated in that panel's window"
         ),
         showarrow=False, xanchor="right", yanchor="bottom",
-        font=dict(size=10, color="#4b5563"), align="right",
+        font=dict(size=9.5, color="#4b5563"), align="right",
     )
 
     fig.update_layout(
         title=dict(
-            text="Hierarchical Bloc Structure — From Whole History to Evidence",
-            x=0.5, xanchor="center", font=dict(size=18, family="Georgia, serif", color="#111827"),
+            text=(
+                "<b>Eurovision Voting Network — Hierarchical Bloc Structure</b>"
+                "<br><span style='font-size:13px;color:#6b7280;'>"
+                "From full history to era split to concrete evidence · 1975–2025</span>"
+            ),
+            x=0.5, xanchor="center",
+            font=dict(size=18, family="Georgia, serif", color="#111827"),
         ),
-        height=1450, width=1150,
-        paper_bgcolor="white", plot_bgcolor="white",
+        height=1500, width=1200,
+        paper_bgcolor="#fafafa", plot_bgcolor="#fafafa",
         showlegend=False,
-        margin=dict(l=30, r=30, t=110, b=40),
+        margin=dict(l=30, r=30, t=120, b=40),
     )
 
     explanation = f"""
-**The story this poster tells:** start with the whole 50-year voting network, then
+**The story this poster tells:** start with the whole 50-year voting network,
 watch it split into two distinct eras, then read the concrete evidence that
-explains *why* the split matters.
+explains why the split matters.
 
-**Noise reduction (applies to Tier 1 and Tier 2 only):** rather than drawing
-every possible relationship, each network keeps only each country's top
-**{top_k_per_country}** strongest outgoing ties (who it gives the most NVS to)
-and top **{top_k_per_country}** strongest incoming ties (who it receives the
-most NVS from) — a pair is drawn if it survives this rule for *either*
-country involved. This caps the network at a small, fixed number of edges per
-country instead of growing with every possible pair, which is what keeps the
-diagram readable as the number of qualifying countries grows. Tier 3's stat
-cards are **not** affected by this filter — they are always computed from the
-full, unfiltered data, so a genuine cold-shoulder or one-way relationship
-cannot be accidentally pruned away from the evidence panel just because it
-didn't make either country's top-{top_k_per_country} list.
+**Edge selection:** for each country A, the top **{top_k_out}** outgoing
+relationships where NVS(A→B) ≥ **{min_nvs_strength}** (on the 0–12 scale)
+are selected. A pair survives if it qualifies from either endpoint's
+outgoing perspective. This threshold means A genuinely and consistently
+favours B, not just occasionally — a minimum average of ~{min_nvs_strength}
+NVS points per year. The NVS score on the 0–12 scale represents points
+normalised by the era's maximum (12 pre-2016, 24 post-2016).
 
-**Tier 1 — Full picture (1975–2025):** every qualifying country (≥{min_years} years
-participation) shown as a node, coloured by detected bloc (Louvain on the
-mutual-affinity graph). Surviving edges follow a single rule:
-`|NVS(A→B) − NVS(B→A)| ≤ {diff_threshold}` → drawn as a **mutual line**; otherwise
-drawn as a **one-way edge** with a small triangle marker pointing toward whichever
-country receives more. Edge colour/opacity is anchored at the **1.0 NVS** mark —
-faint below it, increasingly dark above it — and edges that cross between two
-different detected blocs are red-tinted and kept at full width, while within-bloc
-edges are deliberately thinned.
+**Edge classification:** once a pair survives selection, it is classified:
+if `|NVS(A→B) − NVS(B→A)| ≤ {diff_threshold}` → drawn as a **solid line**
+(MUTUAL — roughly reciprocal, both countries vote for each other at similar
+strength); otherwise → **dashed line + directional triangle** (ONE-WAY —
+one country gives significantly more than it receives back).
 
-**Tier 2 — Two eras, independently detected:** the same encoding (including the
-top-{top_k_per_country} filter) is recomputed separately for **1975–1999** and
-**2000–2025**, including independent bloc detection for each era. A country
-whose bloc membership changed between the two eras (measured by <50% overlap
-in its blocmates, not by bloc label, since labels are reassigned by size each
-time) is outlined in **gold in both panels** — this is the same underlying
-"migration" concept as the Bloc Migration Sankey draft, expressed here as a
-node highlight inside a network layout instead of a Sankey bridge.
+**Node size:** proportional to years participated within that specific
+panel's window (full 1975–2025 for Tier 1; 1975–1999 or 2000–2025 for the
+era panels). A country's node can appear a different size in different panels
+because the window itself changes. **Gold ring** = country's detected bloc
+changed between the two eras (measured by <50% blocmate overlap — not just
+a label change from Louvain renumbering).
 
-**Tier 3 — Per-era evidence:** for each era, three curated facts computed
-directly from the full NVS data (no top-k filtering applied here) — the
-**top mutual voters** (strongest reciprocal pairs), the **top one-way voters**
-(largest asymmetry among pairs that still exchange some votes), and
-**cold-shoulder pairs** (a country that gave essentially zero NVS to another
-for at least {hatred_min_years} eligible years, regardless of what came back
-the other way — computed from a dedicated eligibility frame, not just the raw
-vote rows, so genuine long-term snubs are distinguished from years where the
-two countries simply weren't both competing).
+**Live counts:** each panel's title reports the actual number of countries
+and edges drawn, split into mutual vs one-way, computed from real data.
 
-All thresholds above ({diff_threshold} for mutual/one-way, {hatred_epsilon} for
-cold-shoulder, {min_years}/{hatred_min_years} years for inclusion, top-
-{top_k_per_country} for the network noise filter) are exploratory cutoffs
-chosen for visual and narrative clarity, not formal statistical tests.
+**Tier 3 — evidence:** stat cards computed from the full, unfiltered data —
+never from the edge-selection step — so a genuine cold-shoulder pair is
+never missed just because it didn't clear the NVS strength floor.
+
+Thresholds ({min_nvs_strength} NVS floor, {diff_threshold} mutual/one-way
+split, {min_years} years for inclusion, {hatred_min_years}/{hatred_epsilon}
+for cold-shoulder) are exploratory cutoffs for visual and narrative clarity.
 """
     return fig, "Hierarchical Bloc Structure — Storyboard", explanation
 
@@ -2019,7 +2069,8 @@ def _bloc_disparity_filter_pairs(mat: pd.DataFrame, countries: list, bloc_map: d
 
 def _bloc_classify_edges(mat: pd.DataFrame, countries: list, diff_threshold: float,
                           bloc_map: dict, alpha: float = 0.05,
-                          max_total_edges: int | None = 30) -> list:
+                          max_total_edges: int | None = 30,
+                          min_nvs_strength: float = 1.5) -> list:
     """
     Classify the panel's statistically-significant cross-bloc relationships
     (selected via the disparity filter, see _bloc_disparity_filter_pairs)
@@ -2027,6 +2078,15 @@ def _bloc_classify_edges(mat: pd.DataFrame, countries: list, diff_threshold: flo
     explicit giver/receiver). Every surviving edge is, by construction, a
     cross-bloc tie that the disparity filter judged too strong to be
     explained by chance for at least one of its two endpoints.
+
+    `min_nvs_strength`: secondary gate — even edges that pass the disparity
+    filter are dropped if max(NVS(A→B), NVS(B→A)) < min_nvs_strength on
+    the 0-12 scale. This prevents statistically-significant-but-practically-
+    negligible ties from appearing on the map (e.g. a country with only 2
+    cross-bloc partners where one gives 0.2 NVS — statistically 100%
+    concentrated, but visually meaningless on a poster). Pairs surviving
+    the disparity filter are ranked by this NVS strength for the defensive
+    cap, so the strongest ties always take priority.
     """
     retained_pairs = _bloc_disparity_filter_pairs(
         mat, countries, bloc_map, alpha=alpha, max_total_edges=max_total_edges
@@ -2036,6 +2096,8 @@ def _bloc_classify_edges(mat: pd.DataFrame, countries: list, diff_threshold: flo
     for (a, b) in retained_pairs:
         ab = float(mat.loc[a, b])
         ba = float(mat.loc[b, a])
+        if max(ab, ba) < min_nvs_strength:
+            continue
         if ab <= 0 and ba <= 0:
             continue
         diff = abs(ab - ba)
@@ -2572,6 +2634,7 @@ def build_geo_bloc_migration_poster(
     label_top_n: int = 12,
     disparity_alpha: float = 0.05,
     max_edges_per_panel: int | None = 30,
+    min_nvs_strength: float = 1.5,
 ):
     """
     DRAFT 8 — Geographic Bloc Migration Poster: a four-tier storyboard
@@ -2680,6 +2743,7 @@ def build_geo_bloc_migration_poster(
     full_edges = _bloc_classify_edges(
         full_mat, tier1_countries, diff_threshold, full_bloc,
         alpha=disparity_alpha, max_total_edges=max_edges_per_panel,
+        min_nvs_strength=min_nvs_strength,
     )
 
     # -------------------------------------------------------------------
@@ -2716,10 +2780,12 @@ def build_geo_bloc_migration_poster(
     era1_edges = _bloc_classify_edges(
         era1_mat, era1_countries, diff_threshold, era1_bloc,
         alpha=disparity_alpha, max_total_edges=max_edges_per_panel,
+        min_nvs_strength=min_nvs_strength,
     )
     era2_edges = _bloc_classify_edges(
         era2_mat, era2_countries, diff_threshold, era2_bloc,
         alpha=disparity_alpha, max_total_edges=max_edges_per_panel,
+        min_nvs_strength=min_nvs_strength,
     )
 
     migrated = _bloc_flag_migrated(era1_bloc, era2_bloc)
@@ -2992,3 +3058,1954 @@ for the two qualification rules — remain exploratory cutoffs chosen for
 visual and narrative clarity, not formal statistical tests.
 """
     return fig, "Geographic Bloc Migration Poster", explanation
+
+
+# =============================================================================
+# DIAGRAM 9 — CIRCULAR HIERARCHICAL EDGE BUNDLING (HEB) POSTER
+# =============================================================================
+#
+# Implements Holten (2006) Hierarchical Edge Bundles adapted for Eurovision:
+#
+#   Holten, D.H.R. (2006). "Hierarchical edge bundles: visualization of
+#   adjacency relations in hierarchical data." IEEE Transactions on
+#   Visualization and Computer Graphics, 12(5), 741-748.
+#   DOI: 10.1109/TVCG.2006.147
+#
+# The key insight: Eurovision voting already has the three-level hierarchy
+# Holten's method requires —
+#
+#       Country (leaf) → Detected Bloc (parent) → Centre (root)
+#
+# — so the bundling is not a forced analogy but a structural match to the
+# paper's formulation. Each NVS edge from country A to country B is modelled
+# as a cubic Bézier curve whose control points are pulled toward the respective
+# bloc centroids on an inner ring, controlled by a bundling-strength parameter
+# beta (β):
+#
+#   beta = 0  →  straight chord lines (no bundling)
+#   beta = 0.8 →  strongly bundled through bloc centroids (default)
+#   beta = 1  →  fully routed through bloc centroids and centre
+#
+# Edges between countries in the SAME bloc naturally bundle into one visible
+# highway, because they share both control points at the same bloc centroid.
+# Cross-bloc edges travel inward toward their respective bloc centroids before
+# diverging to the opposite side of the circle, forming the characteristic
+# "woven" cross-bloc pattern.
+#
+# Layout:  countries arranged clockwise starting from the top of the circle,
+#   grouped by detected Louvain bloc (largest bloc first), with equal angular
+#   spacing within each bloc and a small gap arc between blocs.
+# Outer ring: thick coloured arc segments per bloc (same palette as other drafts).
+# Edges:  solid line = mutual (|NVS(A→B) − NVS(B→A)| ≤ diff_threshold);
+#         dashed line = one-way (asymmetric; hover shows direction).
+#         Colour/opacity scales with NVS strength (darker = stronger).
+#
+# Three-tier poster:
+#   Tier 1  Full history 1975–2025 (full-width, large)
+#      ↓  "splits into two eras"
+#   Tier 2  Era 1 1975–1999 | Era 2 2000–2025  (side by side)
+#      ↓  "reveals evidence"
+#   Tier 3  Stat cards per era  (side by side)
+#
+# Edge selection follows Draft 7's NVS-strength-ranked approach: for each
+# country A the top `top_k_out` outgoing relationships where
+# NVS(A→B) >= min_nvs_strength are selected (pair survives if it qualifies
+# from either endpoint's outgoing perspective), so only genuinely strong
+# voting relationships are drawn — no statistical test required, the NVS
+# floor directly encodes "does this relationship actually matter?".
+# =============================================================================
+
+
+def _heb_bezier(
+    ax: float, ay: float, bx: float, by: float,
+    cax: float, cay: float, cbx: float, cby: float,
+    beta: float = 0.80, n: int = 50,
+):
+    """
+    Cubic Bézier path implementing Holten's (2006) hierarchical edge bundling.
+
+    Maps the Holten formulation for a 3-level hierarchy (leaf → parent → root):
+      P0 = country A  (on outer ring, radius 1.0)
+      P1 = control point: interpolate between A and bloc-A centroid by beta
+      P2 = control point: interpolate between B and bloc-B centroid by beta
+      P3 = country B  (on outer ring, radius 1.0)
+
+    At beta=0 all four points collapse to the endpoints (straight chord line).
+    At beta=1 P1 = bloc-A centroid and P2 = bloc-B centroid (fully bundled).
+
+    The B-spline approximation in the original paper reduces to a cubic Bézier
+    for a 3-level hierarchy, which is exactly the case here (country →
+    bloc → centre), per Section 3.2 of Holten (2006).
+    """
+    p1x = ax * (1.0 - beta) + cax * beta
+    p1y = ay * (1.0 - beta) + cay * beta
+    p2x = bx * (1.0 - beta) + cbx * beta
+    p2y = by * (1.0 - beta) + cby * beta
+
+    t = np.linspace(0.0, 1.0, n)
+    cx_arr = (
+        (1 - t) ** 3 * ax
+        + 3 * (1 - t) ** 2 * t * p1x
+        + 3 * (1 - t) * t ** 2 * p2x
+        + t ** 3 * bx
+    )
+    cy_arr = (
+        (1 - t) ** 3 * ay
+        + 3 * (1 - t) ** 2 * t * p1y
+        + 3 * (1 - t) * t ** 2 * p2y
+        + t ** 3 * by
+    )
+    return cx_arr, cy_arr
+
+
+def _heb_circular_layout(
+    countries: list,
+    bloc_map: dict,
+    start_angle: float = np.pi / 2,
+    gap_fraction: float = 0.04,
+    r_outer: float = 1.0,
+    r_inner: float = 0.42,
+):
+    """
+    Arrange countries in a circle, grouped by detected Louvain bloc.
+
+    Countries in the same bloc are placed as adjacent arcs; a small gap arc
+    separates blocs so bloc boundaries are visually clear. Blocs are ordered
+    clockwise by descending size (largest bloc gets the widest arc at the top).
+
+    Returns:
+        pos       {country: (x, y)} positions on the outer ring (radius r_outer)
+        centroids {bloc: (cx, cy)} positions of bloc centroids on inner ring
+        arcs      {bloc: (angle_start, angle_end, [country_angles])} arc data
+    """
+    bloc_members = {}
+    for c, b in bloc_map.items():
+        if c in countries:
+            bloc_members.setdefault(b, [])
+            bloc_members[b].append(c)
+
+    # Sort blocs: descending size, then alphabetical name for stability
+    blocs = sorted(bloc_members.keys(), key=lambda b: (-len(bloc_members[b]), b))
+    n_blocs = len(blocs)
+    if n_blocs == 0:
+        return {}, {}, {}
+
+    total_countries = sum(len(bloc_members[b]) for b in blocs)
+    total_gap = 2 * np.pi * gap_fraction * n_blocs
+    available = 2 * np.pi - total_gap
+    gap = total_gap / n_blocs
+
+    pos = {}
+    centroids = {}
+    arcs = {}
+
+    # Clockwise from start_angle; subtract because clockwise = decreasing angle
+    # in standard mathematical convention (counter-clockwise positive).
+    # We use: angle_cw = start_angle - fraction * 2π for clockwise progression.
+    current = start_angle
+
+    for bloc in blocs:
+        members = sorted(bloc_members[bloc])
+        n = len(members)
+        span = available * n / total_countries
+
+        angles = []
+        for i, c in enumerate(members):
+            # Place at the midpoint of each country's sub-arc within the bloc
+            # Clockwise → subtract from current
+            a = current - (i + 0.5) * span / n
+            angles.append(a)
+            pos[c] = (r_outer * np.cos(a), r_outer * np.sin(a))
+
+        mid = current - span / 2
+        centroids[bloc] = (r_inner * np.cos(mid), r_inner * np.sin(mid))
+        arcs[bloc] = (current, current - span, angles)
+
+        current -= span + gap
+
+    return pos, centroids, arcs
+
+
+def build_circular_heb_poster(
+    df: pd.DataFrame,
+    id2label: dict,
+    nodes_df: pd.DataFrame,
+    min_years: int = 10,
+    diff_threshold: float = 1.0,
+    top_k_out: int = 3,
+    min_nvs_strength: float = 2.0,
+    beta: float = 0.80,
+    hatred_min_years: int = 10,
+    hatred_epsilon: float = 0.04,
+):
+    """
+    DRAFT 9 — Circular Hierarchical Edge Bundling (HEB) Poster.
+
+    Eurovision voting data has the three-level hierarchy that Holten's (2006)
+    method requires — Country → Detected Bloc → Centre — so edges between
+    countries in the same bloc automatically bundle into visible highways,
+    while cross-bloc edges form a distinct woven pattern in the interior.
+
+    This reveals bloc structure through the *visual pattern of curves* rather
+    than through node colouring alone, making the poster legible as a static
+    print from a distance: the reader immediately sees "there are tight bundles
+    here → these countries vote as a bloc" without having to parse individual
+    edge labels.
+
+    Citation: Holten, D.H.R. (2006). Hierarchical edge bundles: visualization
+    of adjacency relations in hierarchical data. IEEE Transactions on
+    Visualization and Computer Graphics, 12(5), 741-748.
+    DOI: 10.1109/TVCG.2006.147
+
+    Returns (figure, title, explanation_markdown) per the module's contract.
+    """
+    from plotly.subplots import make_subplots
+    from collections import defaultdict
+
+    df = _add_era_max_col(df)
+    df["src_label"] = df["source"].map(id2label).fillna(df["source"])
+    df["tgt_label"] = df["target"].map(id2label).fillna(df["target"])
+
+    participation = (
+        pd.concat([
+            df[["year", "src_label"]].rename(columns={"src_label": "country"}),
+            df[["year", "tgt_label"]].rename(columns={"tgt_label": "country"}),
+        ]).drop_duplicates().groupby("country")["year"].nunique()
+    )
+    qualified = sorted(participation[participation >= min_years].index.tolist())
+    df = df[df["src_label"].isin(qualified) & df["tgt_label"].isin(qualified)].copy()
+
+    if df.empty or len(qualified) < 3:
+        return None, "Circular HEB Poster", (
+            f"Not enough countries met the >= {min_years}-year participation "
+            "threshold to build this draft."
+        )
+
+    # -----------------------------------------------------------------------
+    # Shared helpers (same logic as Draft 7 for consistency)
+    # -----------------------------------------------------------------------
+
+    def mean_nvs_matrix(sub_df, countries):
+        if sub_df.empty or not countries:
+            return pd.DataFrame(0.0, index=countries, columns=countries)
+        m = (
+            sub_df.groupby(["src_label", "tgt_label"])["nvs"].mean()
+            .unstack(fill_value=0)
+            .reindex(index=countries, columns=countries, fill_value=0)
+        ) * 12.0
+        return m
+
+    def nvs_strength_backbone(mat, countries):
+        keep = set()
+        for c in countries:
+            out_vals = mat.loc[c].drop(labels=[c], errors="ignore")
+            strong = (
+                out_vals[out_vals >= min_nvs_strength]
+                .sort_values(ascending=False)
+                .head(top_k_out)
+            )
+            for partner in strong.index:
+                keep.add(tuple(sorted([c, partner])))
+        return keep
+
+    def classify_edges(mat, countries):
+        retained = nvs_strength_backbone(mat, countries)
+        edges = []
+        for (a, b) in retained:
+            ab = float(mat.loc[a, b])
+            ba = float(mat.loc[b, a])
+            if ab <= 0 and ba <= 0:
+                continue
+            diff = abs(ab - ba)
+            if diff <= diff_threshold:
+                edges.append({"a": a, "b": b, "kind": "mutual",
+                               "value": (ab + ba) / 2.0, "ab": ab, "ba": ba, "diff": diff})
+            else:
+                giver, receiver = (a, b) if ab > ba else (b, a)
+                edges.append({"a": a, "b": b, "kind": "one_way",
+                               "giver": giver, "receiver": receiver,
+                               "value": max(ab, ba), "ab": ab, "ba": ba, "diff": diff})
+        return edges
+
+    def detect(sub_df, countries):
+        if not countries:
+            return {}
+        aff = _mutual_affinity(_affinity_input(sub_df), countries)
+        return _detect_blocs(aff, countries, q=0.6)
+
+    def flag_migrated(map1, map2):
+        g1, g2 = defaultdict(set), defaultdict(set)
+        for c, b in map1.items():
+            g1[b].add(c)
+        for c, b in map2.items():
+            g2[b].add(c)
+        migrated = set()
+        for c in set(map1) & set(map2):
+            m1 = g1[map1[c]] - {c}
+            m2 = g2[map2[c]] - {c}
+            overlap = (len(m1 & m2) / len(m1)) if m1 else 0.0
+            if overlap < 0.5:
+                migrated.add(c)
+        return migrated
+
+    def eligibility_frame(sub_df, countries):
+        countries_set = set(countries)
+        rows = []
+        for yr, g in sub_df.groupby("year"):
+            participants = (set(g["src_label"]) | set(g["tgt_label"])) & countries_set
+            for s in participants:
+                for t in participants:
+                    if s != t:
+                        rows.append((yr, s, t))
+        if not rows:
+            return pd.DataFrame(columns=["year", "src_label", "tgt_label", "points", "nvs"])
+        elig = pd.DataFrame(rows, columns=["year", "src_label", "tgt_label"])
+        actual = sub_df.groupby(["year", "src_label", "tgt_label"], as_index=False)["points"].sum()
+        m = elig.merge(actual, on=["year", "src_label", "tgt_label"], how="left")
+        m["points"] = m["points"].fillna(0)
+        m["era_max_v"] = m["year"].apply(_era_max)
+        m["nvs"] = (m["points"] / m["era_max_v"]).clip(0, 1)
+        return m
+
+    def era_stats(sub_df, countries, edges):
+        mutual  = sorted([e for e in edges if e["kind"] == "mutual"],
+                         key=lambda e: e["value"], reverse=True)[:3]
+        oneway  = sorted([e for e in edges if e["kind"] == "one_way"],
+                         key=lambda e: e["diff"], reverse=True)[:3]
+        elig = eligibility_frame(sub_df, countries)
+        if elig.empty:
+            return mutual, oneway, pd.DataFrame()
+        agg = (
+            elig.groupby(["src_label", "tgt_label"])
+            .agg(years_eligible=("year", "nunique"), mean_nvs=("nvs", "mean"))
+            .reset_index()
+        )
+        rlookup = {(r["src_label"], r["tgt_label"]): r["mean_nvs"] for _, r in agg.iterrows()}
+        cands = agg[
+            (agg["years_eligible"] >= hatred_min_years) & (agg["mean_nvs"] < hatred_epsilon)
+        ].copy()
+        if cands.empty:
+            return mutual, oneway, cands
+        cands["reciprocal_nvs"] = cands.apply(
+            lambda r: rlookup.get((r["tgt_label"], r["src_label"]), 0.0), axis=1
+        )
+        return mutual, oneway, cands.sort_values(
+            ["years_eligible", "reciprocal_nvs"], ascending=[False, False]
+        ).head(3)
+
+    # -----------------------------------------------------------------------
+    # HEB palette — same bloc colours as other drafts for consistency
+    # -----------------------------------------------------------------------
+    HEB_PALETTE = [
+        "#1f4e79", "#d1495b", "#2a9d8f", "#f4a261",
+        "#6a4c93", "#7f5539", "#577590", "#3a86ff",
+    ]
+
+    # -----------------------------------------------------------------------
+    # Render one HEB panel into the given subplot row/col
+    # -----------------------------------------------------------------------
+
+    participation_total = participation.to_dict()
+    era1_part = (
+        pd.concat([
+            df[df["year"] <= 1999][["year", "src_label"]].rename(columns={"src_label": "country"}),
+            df[df["year"] <= 1999][["year", "tgt_label"]].rename(columns={"tgt_label": "country"}),
+        ]).drop_duplicates().groupby("country")["year"].nunique().to_dict()
+    )
+    era2_part = (
+        pd.concat([
+            df[df["year"] >= 2000][["year", "src_label"]].rename(columns={"src_label": "country"}),
+            df[df["year"] >= 2000][["year", "tgt_label"]].rename(columns={"tgt_label": "country"}),
+        ]).drop_duplicates().groupby("country")["year"].nunique().to_dict()
+    )
+
+    def render_heb(fig, row, col, countries, edges, bloc_map,
+                   part_years=None, migrated=None, label_top_n=14,
+                   show_methodology_box=False):
+        """
+        Draw one circular HEB panel with poster-quality styling:
+        - Subtle background depth rings at r=0.35 and r=0.70
+        - Thick coloured arc segments per bloc with bloc name label at midpoint
+        - Bundled Bézier edge curves (teal solid = mutual, coral dashed = one-way)
+        - Country dots sized by participation years, white outline
+        - Country labels for the top `label_top_n` most active countries
+        - Optional on-chart methodology annotation (show_methodology_box=True for Tier 1)
+        """
+        migrated  = migrated  or set()
+        part_years = part_years or {}
+
+        if not countries:
+            fig.update_xaxes(visible=False, row=row, col=col)
+            fig.update_yaxes(visible=False, row=row, col=col)
+            return
+
+        pos, centroids, arcs = _heb_circular_layout(countries, bloc_map)
+
+        bloc_names  = sorted(set(bloc_map.values()))
+        bloc_color  = {b: HEB_PALETTE[i % len(HEB_PALETTE)] for i, b in enumerate(bloc_names)}
+
+        # ---- background depth rings (give the diagram a readable field) ---------
+        for r_ring, alpha_ring, lw in [(0.70, 0.10, 0.8), (0.42, 0.07, 0.6)]:
+            θ = np.linspace(0, 2 * np.pi, 100)
+            fig.add_trace(go.Scatter(
+                x=r_ring * np.cos(θ), y=r_ring * np.sin(θ),
+                mode="lines",
+                line=dict(color=f"rgba(100,116,139,{alpha_ring:.2f})", width=lw, dash="dot"),
+                hoverinfo="skip", showlegend=False,
+            ), row=row, col=col)
+
+        # ---- outer arc rings + bloc name labels at arc midpoint ----------------
+        for bloc, (a_start, a_end, _) in arcs.items():
+            n_arc = max(30, abs(int((a_start - a_end) / 0.04)))
+            θ_arc = np.linspace(a_start, a_end, n_arc)
+            r_arc = 1.07
+
+            # Thicker arc ring
+            fig.add_trace(go.Scatter(
+                x=r_arc * np.cos(θ_arc), y=r_arc * np.sin(θ_arc),
+                mode="lines", line=dict(color=bloc_color[bloc], width=14),
+                hovertemplate=f"<b>{bloc}</b><extra></extra>",
+                showlegend=False,
+            ), row=row, col=col)
+
+            # Thin inner border line to separate arc from node ring
+            fig.add_trace(go.Scatter(
+                x=1.01 * np.cos(θ_arc), y=1.01 * np.sin(θ_arc),
+                mode="lines",
+                line=dict(color=f"rgba(255,255,255,0.6)", width=1),
+                hoverinfo="skip", showlegend=False,
+            ), row=row, col=col)
+
+            # Bloc name label at arc midpoint, outside the arc
+            mid_θ   = (a_start + a_end) / 2
+            arc_span = abs(a_end - a_start)
+            r_label = 1.22 if arc_span > 0.4 else 1.25  # smaller arcs get pushed further out
+            lx, ly  = r_label * np.cos(mid_θ), r_label * np.sin(mid_θ)
+            # Count members for label
+            members_in_bloc = [c for c in countries if bloc_map.get(c) == bloc]
+            label_text = f"<b>{bloc}</b><br><span style='font-size:7px'>({len(members_in_bloc)})</span>"
+            fig.add_trace(go.Scatter(
+                x=[lx], y=[ly], mode="text",
+                text=[label_text],
+                textfont=dict(size=8.5, color=bloc_color[bloc], family="IBM Plex Mono, monospace"),
+                hoverinfo="skip", showlegend=False,
+            ), row=row, col=col)
+
+        # ---- HEB edges (teal = mutual, coral = one-way) -----------------------
+        max_nvs = max((e["value"] for e in edges), default=1.0) or 1.0
+
+        for e in edges:
+            a, b = e["a"], e["b"]
+            if a not in pos or b not in pos:
+                continue
+            ax_p, ay_p = pos[a]
+            bx_p, by_p = pos[b]
+            cax, cay   = centroids.get(bloc_map.get(a), (0.0, 0.0))
+            cbx, cby   = centroids.get(bloc_map.get(b), (0.0, 0.0))
+
+            norm = min(e["value"] / max_nvs, 1.0)
+            if e["kind"] == "mutual":
+                alpha = 0.25 + 0.70 * norm
+                color = f"rgba(13,148,136,{alpha:.2f})"   # teal
+                dash  = "solid"
+                width = 1.5 + 3.5 * norm
+            else:
+                alpha = 0.22 + 0.65 * norm
+                color = f"rgba(220,86,60,{alpha:.2f})"    # coral-red
+                dash  = "dot"
+                width = 1.2 + 2.8 * norm
+
+            cx_arr, cy_arr = _heb_bezier(ax_p, ay_p, bx_p, by_p, cax, cay, cbx, cby, beta=beta)
+
+            kind_str = "Mutual" if e["kind"] == "mutual" else f"One-way: {e['giver']} \u2192 {e['receiver']}"
+            fig.add_trace(go.Scatter(
+                x=cx_arr, y=cy_arr, mode="lines",
+                line=dict(color=color, width=width, dash=dash),
+                hovertemplate=(
+                    f"<b>{a}</b> \u2194 <b>{b}</b><br>"
+                    f"NVS {a}\u2192{b}: {e['ab']:.2f} | {b}\u2192{a}: {e['ba']:.2f}<br>"
+                    f"{kind_str}<br>"
+                    f"Combined NVS: {e['value']:.2f} / 12<extra></extra>"
+                ),
+                showlegend=False,
+            ), row=row, col=col)
+
+        # ---- country nodes (all at once for performance) ----------------------
+        max_yrs  = max(part_years.values(), default=1) or 1
+        labelled = set(
+            sorted(countries, key=lambda c: part_years.get(c, 0), reverse=True)[:label_top_n]
+        )
+
+        xs, ys, texts, fills, ring_cols, ring_ws, sizes, hovers = [], [], [], [], [], [], [], []
+        for c in countries:
+            if c not in pos:
+                continue
+            x, y = pos[c]
+            yrs  = part_years.get(c, 0)
+            sz   = 10 + 14 * np.sqrt(max(yrs, 0) / max_yrs)   # larger nodes
+            fill = bloc_color.get(bloc_map.get(c), "#9ca3af")
+            if c in migrated:
+                rc, rw = "#facc15", 4.0
+            else:
+                rc, rw = "white", 2.0
+            label = c if c in labelled else ""
+            hover = (
+                f"<b>{c}</b><br>Bloc: {bloc_map.get(c,'NA')}<br>"
+                f"Years in this window: {yrs}"
+                + ("<br><b>\u26a1 Changed bloc between eras</b>" if c in migrated else "")
+            )
+            xs.append(x); ys.append(y); texts.append(label)
+            fills.append(fill); ring_cols.append(rc); ring_ws.append(rw)
+            sizes.append(sz); hovers.append(hover)
+
+        fig.add_trace(go.Scatter(
+            x=xs, y=ys, mode="markers+text",
+            text=texts, textposition="top center",
+            textfont=dict(size=10, color="#111827", family="IBM Plex Mono, monospace"),
+            marker=dict(size=sizes, color=fills,
+                        line=dict(width=ring_ws, color=ring_cols)),
+            hovertext=hovers, hovertemplate="%{hovertext}<extra></extra>",
+            showlegend=False,
+        ), row=row, col=col)
+
+        # ---- on-chart methodology box (Tier 1 only) --------------------------
+        if show_methodology_box:
+            n_mutual = sum(1 for e in edges if e["kind"] == "mutual")
+            n_one    = len(edges) - n_mutual
+            method_text = (
+                f"<b>WHAT IS BEING SHOWN</b><br>"
+                f"<br>"
+                f"<b>Technique:</b> Hierarchical Edge Bundling<br>"
+                f"<i>Holten (2006) IEEE TVCG 12(5):741-748</i><br>"
+                f"<br>"
+                f"<b>Hierarchy used:</b><br>"
+                f"Country → Voting Bloc → Centre<br>"
+                f"(3-level compound graph structure)<br>"
+                f"<br>"
+                f"<b>How bundling works:</b><br>"
+                f"Each edge is a Bézier curve pulled {int(beta*100)}%<br>"
+                f"toward the countries' shared bloc centroid.<br>"
+                f"Same-bloc edges converge → visible bundle.<br>"
+                f"Cross-bloc edges arc through the interior.<br>"
+                f"<br>"
+                f"<b>What to look for:</b><br>"
+                f"Dense bundles = strong voting alliances<br>"
+                f"Diagonal arcs = cross-bloc relationships<br>"
+                f"<br>"
+                f"<b>Edges shown:</b> {n_mutual} mutual + {n_one} one-way<br>"
+                f"<b>Selection:</b> top {top_k_out} outgoing where<br>"
+                f"NVS ≥ {min_nvs_strength}/12 per country<br>"
+                f"<br>"
+                f"<b>Metric:</b> NVS(A→B) = points / era_max<br>"
+                f"era_max = 12 (1975–2015) · 24 (2016–2025)"
+            )
+            fig.add_annotation(
+                x=-1.32, y=-1.08,
+                text=method_text,
+                showarrow=False,
+                xanchor="left", yanchor="bottom",
+                font=dict(size=8.5, color="#374151"),
+                bgcolor="rgba(255,255,255,0.97)",
+                bordercolor="#6366f1",
+                borderwidth=1.5,
+                borderpad=10,
+                align="left",
+                row=row, col=col,
+            )
+
+        # ---- axis setup (square, equal scale, invisible) ---------------------
+        fig.update_xaxes(
+            visible=False, range=[-1.45, 1.45],
+            scaleanchor=f"y{'' if (row == 1 and col == 1) else str((row - 1) * 2 + col)}",
+            scaleratio=1, row=row, col=col,
+        )
+        fig.update_yaxes(visible=False, range=[-1.45, 1.45], row=row, col=col)
+
+
+    def render_stat_panel(fig, row, col, era_label, top_mutual, top_oneway, top_hatred):
+        fig.update_xaxes(visible=False, range=[0, 1], row=row, col=col)
+        fig.update_yaxes(visible=False, range=[0, 1], row=row, col=col)
+
+        mutual_lines = [
+            f"\U0001f91d {e['a']} \u2194 {e['b']}  (NVS {e['value']:.1f})" for e in top_mutual
+        ] or ["No qualifying mutual pairs"]
+        oneway_lines = [
+            f"\u27a1\ufe0f {e['giver']} \u2192 {e['receiver']}  (\u0394{e['diff']:.1f})" for e in top_oneway
+        ] or ["No qualifying one-way pairs"]
+        if top_hatred is None or top_hatred.empty:
+            hatred_lines = ["No sustained cold-shoulder pairs found"]
+        else:
+            hatred_lines = [
+                f"\u2744\ufe0f {r['src_label']} \u21cf {r['tgt_label']}  ({int(r['years_eligible'])} yrs)"
+                for _, r in top_hatred.iterrows()
+            ]
+
+        sections = [
+            ("Top mutual voters (NVS \u2248 equal both ways)", mutual_lines),
+            ("Top one-way voters (strong asymmetry)", oneway_lines),
+            ("Cold-shoulder pairs (near-zero NVS)", hatred_lines),
+        ]
+        y = 0.95
+        fig.add_annotation(
+            x=0.03, y=1.0, text=f"<b>{era_label}</b>", showarrow=False,
+            font=dict(size=13, color="#1f2937", family="Georgia, serif"),
+            xanchor="left", yanchor="top", row=row, col=col,
+        )
+        y -= 0.12
+        for heading, lines in sections:
+            fig.add_annotation(
+                x=0.03, y=y, text=f"<b>{heading}</b>", showarrow=False,
+                font=dict(size=10, color="#374151"), xanchor="left", yanchor="top",
+                row=row, col=col,
+            )
+            y -= 0.09
+            for line in lines[:3]:
+                fig.add_annotation(
+                    x=0.06, y=y, text=line, showarrow=False,
+                    font=dict(size=9, color="#4b5563"), xanchor="left", yanchor="top",
+                    row=row, col=col,
+                )
+                y -= 0.08
+            y -= 0.02
+
+    # -----------------------------------------------------------------------
+    # Compute data for all three tiers
+    # -----------------------------------------------------------------------
+
+    # Tier 1 — full history
+    full_mat    = mean_nvs_matrix(df, qualified)
+    full_bloc   = detect(df, qualified)
+    full_edges  = classify_edges(full_mat, qualified)
+
+    # Tier 2 — two independently-detected eras
+    era1_df = df[df["year"] <= 1999]
+    era2_df = df[df["year"] >= 2000]
+
+    era1_countries = sorted({
+        c for c in qualified if c in set(era1_df["src_label"]) | set(era1_df["tgt_label"])
+    })
+    era2_countries = sorted({
+        c for c in qualified if c in set(era2_df["src_label"]) | set(era2_df["tgt_label"])
+    })
+
+    era1_mat   = mean_nvs_matrix(era1_df, era1_countries)
+    era2_mat   = mean_nvs_matrix(era2_df, era2_countries)
+    era1_bloc  = detect(era1_df, era1_countries)
+    era2_bloc  = detect(era2_df, era2_countries)
+    era1_edges = classify_edges(era1_mat, era1_countries)
+    era2_edges = classify_edges(era2_mat, era2_countries)
+
+    migrated = flag_migrated(era1_bloc, era2_bloc)
+
+    # Tier 3 — evidence
+    top_m1, top_o1, top_h1 = era_stats(era1_df, era1_countries, era1_edges)
+    top_m2, top_o2, top_h2 = era_stats(era2_df, era2_countries, era2_edges)
+
+    # -----------------------------------------------------------------------
+    # Panel titles with live edge/country counts
+    # -----------------------------------------------------------------------
+
+    def _ptitle(prefix, countries, edges):
+        nm = sum(1 for e in edges if e["kind"] == "mutual")
+        no = len(edges) - nm
+        return (
+            f"{prefix}<br>"
+            f"<span style='font-size:11px;color:#6b7280;'>"
+            f"{len(countries)} countries \u00b7 {len(edges)} edges "
+            f"({nm} mutual \u2014, {no} one-way \u2508)</span>"
+        )
+
+    # -----------------------------------------------------------------------
+    # Figure assembly
+    # -----------------------------------------------------------------------
+
+    row_heights = [0.44, 0.30, 0.26]
+    vspacing = 0.09
+    total_gap = vspacing * 2
+    avail = 1.0 - total_gap
+    scaled = [h * avail for h in row_heights]
+
+    boundaries = []
+    top_cur = 1.0
+    for h in scaled:
+        bot = top_cur - h
+        boundaries.append((top_cur, bot))
+        top_cur = bot - vspacing
+
+    fig = make_subplots(
+        rows=3, cols=2,
+        row_heights=row_heights,
+        vertical_spacing=vspacing,
+        horizontal_spacing=0.07,
+        specs=[
+            [{"colspan": 2}, None],
+            [{}, {}],
+            [{}, {}],
+        ],
+        subplot_titles=[
+            _ptitle("Full picture \u00b7 1975\u20132025", qualified, full_edges),
+            _ptitle("Era 1 \u00b7 1975\u20131999", era1_countries, era1_edges),
+            _ptitle("Era 2 \u00b7 2000\u20132025", era2_countries, era2_edges),
+            "Era 1 insights", "Era 2 insights",
+        ],
+    )
+
+    render_heb(fig, 1, 1, qualified, full_edges, full_bloc,
+               part_years=participation_total, show_methodology_box=True)
+    render_heb(fig, 2, 1, era1_countries, era1_edges, era1_bloc,
+               part_years=era1_part, migrated=migrated)
+    render_heb(fig, 2, 2, era2_countries, era2_edges, era2_bloc,
+               part_years=era2_part, migrated=migrated)
+    render_stat_panel(fig, 3, 1, "1975\u20131999", top_m1, top_o1, top_h1)
+    render_stat_panel(fig, 3, 2, "2000\u20132025", top_m2, top_o2, top_h2)
+
+    # ---- dotted flow connectors -------------------------------------------
+    def add_connector(x, y_top, y_bot, label):
+        fig.add_shape(
+            type="line", x0=x, y0=y_top - 0.005, x1=x, y1=y_bot + 0.018,
+            line=dict(dash="dot", color="#94a3b8", width=2),
+            xref="paper", yref="paper",
+        )
+        fig.add_annotation(
+            x=x, y=y_bot + 0.014, text="\u25bc", showarrow=False,
+            xref="paper", yref="paper", font=dict(size=13, color="#94a3b8"),
+        )
+        fig.add_annotation(
+            x=x, y=(y_top + y_bot) / 2, text=label, showarrow=False,
+            xref="paper", yref="paper",
+            font=dict(size=10, color="#64748b", family="Georgia, serif"),
+            bgcolor="rgba(248,250,252,0.9)", borderpad=3,
+        )
+
+    g1t, g1b = boundaries[0][1], boundaries[1][0]
+    g2t, g2b = boundaries[1][1], boundaries[2][0]
+    add_connector(0.25, g1t, g1b, "splits into two eras")
+    add_connector(0.75, g1t, g1b, "splits into two eras")
+    add_connector(0.25, g2t, g2b, "reveals evidence")
+    add_connector(0.75, g2t, g2b, "reveals evidence")
+
+    # ---- compact reading guide (top-right, bordered card style) ----------
+    fig.add_annotation(
+        x=0.99, y=1.065, xref="paper", yref="paper",
+        text=(
+            "<b>HOW TO READ THIS DIAGRAM</b><br>"
+            "<br>"
+            "<b>Layout:</b> countries arranged in a circle grouped by<br>"
+            "detected voting bloc (coloured outer arc = one bloc)<br>"
+            "<br>"
+            "<b>Edge bundling:</b> curves are pulled toward their shared<br>"
+            "bloc centroid (β={beta:.2f}). Tight bundles = countries<br>"
+            "consistently voting for the same bloc partners<br>"
+            "<br>"
+            "<span style='color:rgb(13,148,136)'><b>━━━ Teal solid</b></span>"
+            " = Mutual relationship<br>"
+            "<span style='font-size:9px;color:#6b7280;'>"
+            "   (NVS each way within {diff_threshold:.1f} of each other)</span><br>"
+            "<span style='color:rgb(220,86,60)'><b>┈┈┈ Coral dotted</b></span>"
+            " = One-way (hover → direction)<br>"
+            "<span style='font-size:9px;color:#6b7280;'>"
+            "   (one country gives noticeably more than it gets)</span><br>"
+            "<br>"
+            "<b>Node size</b> = years participated in this window<br>"
+            "<span style='color:#b45309'><b>Gold ring</b></span>"
+            " = country changed voting bloc between eras<br>"
+            "<br>"
+            "<span style='font-size:8px;color:#94a3b8;'>"
+            "Algorithm: Holten (2006) IEEE TVCG 12(5):741-748<br>"
+            "NVS = points / era_max · era_max=12 (≤2015), 24 (≥2016)</span>"
+        ).format(beta=beta, diff_threshold=diff_threshold),
+        showarrow=False, xanchor="right", yanchor="bottom",
+        font=dict(size=9, color="#374151"), align="right",
+        bgcolor="rgba(255,255,255,0.97)", bordercolor="#94a3b8",
+        borderwidth=1.5, borderpad=10,
+    )
+
+    fig.update_layout(
+        title=dict(
+            text=(
+                "<b>Eurovision Voting Network \u00b7 Hierarchical Edge Bundling (Holten 2006)</b>"
+                "<br><span style='font-size:12px;color:#64748b;'>"
+                "Country \u2192 Detected Louvain Bloc \u2192 Centre hierarchy \u00b7 "
+                "cubic B\u00e9zier bundling (\u03b2={beta:.2f}) \u00b7 "
+                "NVS-strength edge selection \u00b7 1975\u20132025"
+                "</span>"
+            ).format(beta=beta),
+            x=0.5, xanchor="center",
+            font=dict(size=17, family="Georgia, serif", color="#111827"),
+        ),
+        height=1650, width=1250,
+        paper_bgcolor="#f8fafc", plot_bgcolor="#f8fafc",
+        showlegend=False,
+        margin=dict(l=30, r=30, t=140, b=40),
+    )
+
+    explanation = f"""
+**Why hierarchical edge bundling for Eurovision?**
+
+Eurovision voting data has the three-level hierarchy that Holten's (2006)
+method was designed for:
+
+```
+Country (leaf)  →  Detected Louvain Bloc (parent)  →  Centre (root)
+```
+
+This is not a forced analogy: Holten's paper explicitly targets "compound
+graphs" where items (countries) have both pairwise relations (NVS votes) and
+a hierarchical grouping (bloc membership). Routing each NVS edge as a cubic
+Bézier through the two endpoints' bloc centroids causes edges within the same
+bloc to naturally converge into a shared curved highway, while cross-bloc
+edges form a woven pattern in the interior. The bloc structure is therefore
+visible as a **visual pattern** — tight bundles — rather than only through
+node colouring.
+
+**Citation:** Holten, D.H.R. (2006). Hierarchical edge bundles: visualization
+of adjacency relations in hierarchical data. *IEEE Transactions on
+Visualization and Computer Graphics*, 12(5), 741–748.
+DOI: 10.1109/TVCG.2006.147
+
+**Bundling strength β = {beta:.2f}:** the Bézier control points are
+interpolated between the country's own position (β = 0 → straight chord
+line) and the bloc centroid on the inner ring (β = 1 → fully bundled through
+centroids). At β = {beta:.2f}, {int(beta*100)}% of the pull is toward the
+hierarchy path. This follows Holten's β parameter (Section 3 of the paper);
+the cubic Bézier is the closed-form solution for his B-spline when the
+hierarchy has exactly three levels (leaf → parent → root), which is the case
+here.
+
+**Edge selection:** same NVS-strength-ranked approach as Draft 7 — for each
+country A, the top **{top_k_out}** outgoing relationships where
+NVS(A→B) ≥ **{min_nvs_strength}/12** are selected; a pair survives if it
+qualifies from either endpoint's perspective. This keeps only genuinely
+strong voting ties, not statistical artefacts.
+
+**Edge classification:** `|NVS(A→B) − NVS(B→A)| ≤ {diff_threshold}` → solid
+blue curve (MUTUAL); otherwise dashed red curve (ONE-WAY). Colour opacity
+scales with NVS strength so stronger ties are more visible in print.
+
+**Node size:** proportional to participation years within that panel's
+specific time window (1975–2025 for Tier 1; 1975–1999 or 2000–2025 for era
+panels). **Gold ring** = country's detected bloc changed between eras
+(measured by <50% blocmate overlap — not a label change from Louvain
+renumbering).
+
+**Thesis placement:** cite Holten (2006) in Section 4.3 (Layout Strategy)
+and Section 4.4 (Visual Encoding). The algorithm is directly applicable to
+the Eurovision hierarchy and reduces visual clutter without removing any
+nodes, consistent with the poster's requirement to show all qualifying
+countries.
+
+All thresholds ({min_nvs_strength} NVS floor, {diff_threshold} mutual/one-way
+split, {min_years} years for inclusion, {hatred_min_years}/{hatred_epsilon}
+for cold-shoulder detection) are exploratory cutoffs chosen for visual and
+narrative clarity, not formal statistical tests.
+"""
+    return fig, "Circular HEB — Hierarchical Edge Bundling", explanation
+
+# =============================================================================
+# DIAGRAM 10 — GEOGRAPHIC HIERARCHICAL EDGE BUNDLING POSTER
+# =============================================================================
+#
+# The same Holten (2006) HEB algorithm as Draft 9, but with countries placed
+# at their REAL geographic coordinates instead of an abstract circular layout.
+# Bloc centroids are computed as the geographic centre-of-mass (mean lat/lon)
+# of each detected bloc's member countries. Bézier control points are those
+# geographic centroids, so edges bundle toward the geographic heart of each
+# voting region.
+#
+# This answers a question the circular layout cannot: does the bundling
+# pattern align with geographic regions? If the Nordic bloc's centroid sits
+# near Scandinavia and the Balkan bloc's centroid sits near the Adriatic, the
+# bundles will visually trace the actual corridors of influence on the map,
+# making geographic clustering immediately readable as spatial pattern rather
+# than abstract structure.
+#
+# Additional visual: bloc centroids are drawn as large semi-transparent
+# 'hub' circles on the map, labelled with the bloc name. These hubs are the
+# geographic analogue of the inner-ring control points in the circular version.
+#
+# Edge encoding:  solid teal = mutual · dotted coral = one-way
+# Node encoding:  colour = bloc · size = participation years in panel window
+# Migration:      gold ring (Era 1 "about to move") ·
+#                 coloured ring = previous bloc colour (Era 2 "moved from")
+# =============================================================================
+
+
+def _geo_heb_bezier(
+    lat_a: float, lon_a: float,
+    lat_b: float, lon_b: float,
+    ctrl_lat_1: float, ctrl_lon_1: float,
+    ctrl_lat_2: float, ctrl_lon_2: float,
+    beta: float = 0.80, n: int = 30,
+):
+    """
+    Cubic Bézier path in lat/lon space implementing geographic HEB.
+
+    The control points are the geographic bloc centroids, interpolated with
+    beta toward the straight great-circle path (approximated here as a
+    straight line in Mercator-like lat/lon space — acceptable for the
+    Europe-scale distances in the Eurovision dataset).
+
+    At beta=0  → straight line between A and B  (no bundling)
+    At beta=1  → fully routed through bloc centroids (maximum bundling)
+    """
+    cp1_lat = lat_a * (1.0 - beta) + ctrl_lat_1 * beta
+    cp1_lon = lon_a * (1.0 - beta) + ctrl_lon_1 * beta
+    cp2_lat = lat_b * (1.0 - beta) + ctrl_lat_2 * beta
+    cp2_lon = lon_b * (1.0 - beta) + ctrl_lon_2 * beta
+
+    t = np.linspace(0.0, 1.0, n)
+    lats = (1-t)**3*lat_a + 3*(1-t)**2*t*cp1_lat + 3*(1-t)*t**2*cp2_lat + t**3*lat_b
+    lons = (1-t)**3*lon_a + 3*(1-t)**2*t*cp1_lon + 3*(1-t)*t**2*cp2_lon + t**3*lon_b
+    return lats, lons
+
+
+_GEO_HEB_PALETTE = [
+    "#1f4e79", "#d1495b", "#2a9d8f", "#f4a261",
+    "#6a4c93", "#7f5539", "#577590", "#3a86ff",
+]
+
+
+def _geo_heb_compute_bloc_centroids(
+    bloc_map: dict, coord_lookup: dict
+) -> dict:
+    """
+    Compute the geographic centre-of-mass (mean lat/lon) for each detected
+    bloc, using only countries that have real coordinates.
+    """
+    lats_by_bloc, lons_by_bloc = {}, {}
+    for c, b in bloc_map.items():
+        if c in coord_lookup:
+            lats_by_bloc.setdefault(b, []).append(coord_lookup[c][0])
+            lons_by_bloc.setdefault(b, []).append(coord_lookup[c][1])
+    return {
+        b: (float(np.mean(lats_by_bloc[b])), float(np.mean(lons_by_bloc[b])))
+        for b in lats_by_bloc
+    }
+
+
+def _geo_heb_render_panel(
+    fig, row: int, col: int,
+    countries: list, edges: list, bloc_map: dict,
+    coord_lookup: dict, geo_centroids: dict,
+    part_years: dict | None = None,
+    migrated_gold: set | None = None,
+    migrated_ring_color: dict | None = None,
+    beta: float = 0.80,
+    label_top_n: int = 12,
+    show_methodology_box: bool = False,
+    diff_threshold: float = 1.0,
+    top_k_out: int = 3,
+    min_nvs_strength: float = 2.0,
+):
+    """
+    Render one geographic HEB panel using Scattergeo traces.
+
+    Steps:
+    1. Draw bloc centroid 'hub' circles (large, semi-transparent markers)
+    2. Draw bundled Bézier edges as Scattergeo line traces
+    3. Draw country nodes (sized by participation years)
+    4. Apply auto-fit projection so all plotted countries are visible
+    """
+    part_years        = part_years or {}
+    migrated_gold     = migrated_gold or set()
+    migrated_ring_color = migrated_ring_color or {}
+
+    plot_countries = [c for c in countries if c in coord_lookup]
+    if not plot_countries:
+        return
+
+    bloc_names = sorted(set(bloc_map.values()))
+    bloc_color = {b: _GEO_HEB_PALETTE[i % len(_GEO_HEB_PALETTE)] for i, b in enumerate(bloc_names)}
+
+    # ---- bloc centroid 'hub' markers (larger, clearer) -----------------------
+    for bloc, (clat, clon) in geo_centroids.items():
+        if bloc not in bloc_color:
+            continue
+        bc = bloc_color[bloc]
+        h  = bc.lstrip("#")
+        r2, g2, b2 = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+        fig.add_trace(go.Scattergeo(
+            lon=[clon], lat=[clat],
+            mode="markers+text",
+            text=[f"<b>{bloc}</b>"],
+            textposition="top center",
+            textfont=dict(size=9.5, color=bc, family="IBM Plex Mono, monospace"),
+            marker=dict(
+                size=34,
+                color=f"rgba({r2},{g2},{b2},0.15)",
+                line=dict(width=2.5, color=f"rgba({r2},{g2},{b2},0.55)"),
+                symbol="circle",
+            ),
+            hovertemplate=f"<b>{bloc}</b> centroid<br>{clat:.1f}°N, {clon:.1f}°E<extra></extra>",
+            showlegend=False,
+        ), row=row, col=col)
+
+    # ---- HEB edges (Scattergeo with bezier points) ---------------------------
+    max_nvs = max((e["value"] for e in edges), default=1.0) or 1.0
+
+    for e in edges:
+        a, b = e["a"], e["b"]
+        if a not in coord_lookup or b not in coord_lookup:
+            continue
+        lat_a, lon_a = coord_lookup[a]
+        lat_b, lon_b = coord_lookup[b]
+
+        bloc_a = bloc_map.get(a)
+        bloc_b = bloc_map.get(b)
+        ctrl1  = geo_centroids.get(bloc_a, (lat_a, lon_a))
+        ctrl2  = geo_centroids.get(bloc_b, (lat_b, lon_b))
+
+        norm = min(e["value"] / max_nvs, 1.0)
+        if e["kind"] == "mutual":
+            alpha = 0.30 + 0.65 * norm
+            color = f"rgba(13,148,136,{alpha:.2f})"
+            dash  = "solid"
+            width = 1.8 + 3.2 * norm
+        else:
+            alpha = 0.25 + 0.60 * norm
+            color = f"rgba(220,86,60,{alpha:.2f})"
+            dash  = "dot"
+            width = 1.4 + 2.6 * norm
+
+        path_lat, path_lon = _geo_heb_bezier(
+            lat_a, lon_a, lat_b, lon_b,
+            ctrl1[0], ctrl1[1], ctrl2[0], ctrl2[1],
+            beta=beta,
+        )
+
+        kind_str = (
+            "Mutual" if e["kind"] == "mutual"
+            else f"One-way: {e['giver']} \u2192 {e['receiver']}"
+        )
+        fig.add_trace(go.Scattergeo(
+            lon=path_lon, lat=path_lat,
+            mode="lines",
+            line=dict(color=color, width=width, dash=dash),
+            hovertemplate=(
+                f"<b>{a}</b> \u2194 <b>{b}</b><br>"
+                f"NVS {a}\u2192{b}: {e['ab']:.2f} | {b}\u2192{a}: {e['ba']:.2f}<br>"
+                f"{kind_str}<br>Combined NVS: {e['value']:.2f} / 12<extra></extra>"
+            ),
+            showlegend=False,
+        ), row=row, col=col)
+
+    # ---- country nodes -------------------------------------------------------
+    max_yrs = max(part_years.values(), default=1) or 1
+    labelled = set(
+        sorted(plot_countries, key=lambda c: part_years.get(c, 0), reverse=True)[:label_top_n]
+    )
+
+    for c in plot_countries:
+        lat, lon = coord_lookup[c]
+        yrs  = part_years.get(c, 0)
+        sz   = 11 + 14 * np.sqrt(max(yrs, 0) / max_yrs)
+        fill = bloc_color.get(bloc_map.get(c), "#9ca3af")
+
+        if c in migrated_ring_color:
+            rc, rw = migrated_ring_color[c], 3.5
+        elif c in migrated_gold:
+            rc, rw = "#facc15", 3.5
+        else:
+            rc, rw = "white", 1.5
+
+        label = f"<b>{c}</b>" if c in labelled else ""
+
+        hover = (
+            f"<b>{c}</b><br>Bloc: {bloc_map.get(c,'NA')}<br>"
+            f"Years in this window: {yrs}<br>"
+            f"Lat: {lat:.1f}° Lon: {lon:.1f}°"
+            + ("<br><b>\u26a1 Changed bloc between eras</b>" if c in migrated_gold or c in migrated_ring_color else "")
+        )
+
+        fig.add_trace(go.Scattergeo(
+            lon=[lon], lat=[lat],
+            mode="markers+text",
+            text=[label], textposition="top center",
+            textfont=dict(size=9.5, color="#111827", family="IBM Plex Mono, monospace"),
+            marker=dict(
+                size=sz, color=fill,
+                line=dict(width=rw, color=rc),
+            ),
+            hovertemplate=hover + "<extra></extra>",
+            showlegend=False,
+        ), row=row, col=col)
+
+    # ---- auto-fit projection using explicit lat/lon bounds -------------------
+    # fitbounds="locations" is unreliable in mixed scattergeo+xy make_subplots
+    # layouts (it silently fails, leaving the entire world view visible and
+    # making country nodes invisible). We compute the bounds directly from the
+    # plotted coordinates and set lataxis_range / lonaxis_range explicitly.
+    if plot_countries:
+        all_lats = [coord_lookup[c][0] for c in plot_countries]
+        all_lons = [coord_lookup[c][1] for c in plot_countries]
+        pad_lat  = max(5.0, (max(all_lats) - min(all_lats)) * 0.18)
+        pad_lon  = max(6.0, (max(all_lons) - min(all_lons)) * 0.18)
+        lat_min, lat_max = min(all_lats) - pad_lat, max(all_lats) + pad_lat
+        lon_min, lon_max = min(all_lons) - pad_lon, max(all_lons) + pad_lon
+    else:
+        lat_min, lat_max = 25.0, 75.0   # fallback: Europe bounding box
+        lon_min, lon_max = -25.0, 65.0
+
+    fig.update_geos(
+        projection_type="natural earth",
+        showland=True,      landcolor="#eef2f7",
+        showocean=True,     oceancolor="#d4e8f8",
+        showcountries=True, countrycolor="#aabace",
+        showcoastlines=True, coastlinecolor="#7a9ab8",
+        showrivers=False, showlakes=True, lakecolor="#d4e8f8",
+        showframe=False,
+        lataxis_range=[lat_min, lat_max],
+        lonaxis_range=[lon_min, lon_max],
+        row=row, col=col,
+    )
+
+    # ---- on-chart methodology box (Tier 1 only, in paper coordinates) ------
+    if show_methodology_box:
+        n_mutual = sum(1 for e in edges if e["kind"] == "mutual")
+        n_one    = len(edges) - n_mutual
+        fig.add_annotation(
+            x=0.01, y=0.99, xref="paper", yref="paper",
+            text=(
+                f"<b>WHAT IS BEING SHOWN</b><br>"
+                f"<br>"
+                f"<b>Technique:</b> Geographic Hierarchical Edge Bundling<br>"
+                f"<i>Holten (2006) IEEE TVCG 12(5):741-748</i><br>"
+                f"<br>"
+                f"<b>Node positions:</b> real lat/lon coordinates<br>"
+                f"<b>Node size:</b> years participated in this window<br>"
+                f"<b>Node colour:</b> detected Louvain voting bloc<br>"
+                f"<br>"
+                f"<b>Edge bundling:</b> each NVS edge is a Bézier curve<br>"
+                f"pulled {int(beta*100)}% toward the geographic centroid<br>"
+                f"of the countries' shared voting bloc.<br>"
+                f"<br>"
+                f"<b>What to look for:</b><br>"
+                f"Converging lines = strong voting corridor<br>"
+                f"Large hub circles = geographic bloc centres<br>"
+                f"Teal solid = mutual · Coral dotted = one-way<br>"
+                f"<br>"
+                f"<b>Edges shown:</b> {n_mutual} mutual + {n_one} one-way<br>"
+                f"NVS = points / era_max (12 pre-2016 · 24 post-2016)"
+            ),
+            showarrow=False, xanchor="left", yanchor="top",
+            font=dict(size=8.5, color="#374151"), align="left",
+            bgcolor="rgba(255,255,255,0.96)",
+            bordercolor="#2a9d8f", borderwidth=1.5, borderpad=10,
+        )
+
+
+def build_geographic_heb_poster(
+    df: pd.DataFrame,
+    id2label: dict,
+    nodes_df: pd.DataFrame,
+    min_years: int = 10,
+    diff_threshold: float = 1.0,
+    top_k_out: int = 3,
+    min_nvs_strength: float = 2.0,
+    beta: float = 0.80,
+    hatred_min_years: int = 10,
+    hatred_epsilon: float = 0.04,
+):
+    """
+    DRAFT 10 — Geographic Hierarchical Edge Bundling Poster.
+
+    Same algorithm as Draft 9 (Holten 2006 cubic Bézier HEB) but countries
+    are placed at their real geographic coordinates. Bloc centroids are the
+    geographic centre-of-mass of each detected bloc's members; edges are
+    bundled through those geographic hubs, creating visible voting corridors
+    on the actual map of Europe and its neighbours.
+
+    This answers: *does the bundling pattern align with geographic regions?*
+    Whereas Draft 9 (circular layout) reveals the bloc structure as an
+    abstract visual pattern, Draft 10 lets the reader immediately see whether
+    the Nordic bloc really does cluster in Scandinavia, whether the Balkan
+    bloc forms a southeast hub, etc.
+
+    Three-tier storyboard (same flow structure as other poster drafts):
+      Tier 1  Full history 1975–2025 geographic HEB (full-width)
+         ↓ splits into two eras
+      Tier 2  Era 1 1975–1999 | Era 2 2000–2025 side-by-side
+         ↓ reveals evidence
+      Tier 3  Stat cards per era
+
+    Returns (figure, title, explanation_markdown).
+    """
+    from plotly.subplots import make_subplots
+    from collections import defaultdict
+
+    df = _add_era_max_col(df)
+    df["src_label"] = df["source"].map(id2label).fillna(df["source"])
+    df["tgt_label"] = df["target"].map(id2label).fillna(df["target"])
+
+    participation = (
+        pd.concat([
+            df[["year", "src_label"]].rename(columns={"src_label": "country"}),
+            df[["year", "tgt_label"]].rename(columns={"tgt_label": "country"}),
+        ]).drop_duplicates().groupby("country")["year"].nunique()
+    )
+    qualified = sorted(participation[participation >= min_years].index.tolist())
+    df = df[df["src_label"].isin(qualified) & df["tgt_label"].isin(qualified)].copy()
+
+    coord_lookup = _coord_lookup(nodes_df, id2label)
+    qualified = [c for c in qualified if c in coord_lookup]
+
+    if df.empty or len(qualified) < 3:
+        return None, "Geographic HEB Poster", (
+            f"Not enough countries met the >= {min_years}-year participation "
+            "threshold with usable coordinates."
+        )
+
+    df = df[df["src_label"].isin(qualified) & df["tgt_label"].isin(qualified)].copy()
+
+    # ---- shared helpers (same as Draft 9) ----------------------------------
+
+    def mean_nvs_matrix(sub_df, countries):
+        if sub_df.empty or not countries:
+            return pd.DataFrame(0.0, index=countries, columns=countries)
+        return (
+            sub_df.groupby(["src_label", "tgt_label"])["nvs"].mean()
+            .unstack(fill_value=0)
+            .reindex(index=countries, columns=countries, fill_value=0)
+        ) * 12.0
+
+    def nvs_backbone(mat, countries):
+        keep = set()
+        for c in countries:
+            out_vals = mat.loc[c].drop(labels=[c], errors="ignore")
+            strong = (
+                out_vals[out_vals >= min_nvs_strength]
+                .sort_values(ascending=False).head(top_k_out)
+            )
+            for partner in strong.index:
+                keep.add(tuple(sorted([c, partner])))
+        return keep
+
+    def classify_edges(mat, countries):
+        retained = nvs_backbone(mat, countries)
+        edges = []
+        for (a, b) in retained:
+            ab = float(mat.loc[a, b]); ba = float(mat.loc[b, a])
+            if ab <= 0 and ba <= 0:
+                continue
+            diff = abs(ab - ba)
+            if diff <= diff_threshold:
+                edges.append({"a": a, "b": b, "kind": "mutual",
+                               "value": (ab+ba)/2, "ab": ab, "ba": ba, "diff": diff})
+            else:
+                gv, rv = (a, b) if ab > ba else (b, a)
+                edges.append({"a": a, "b": b, "kind": "one_way",
+                               "giver": gv, "receiver": rv,
+                               "value": max(ab, ba), "ab": ab, "ba": ba, "diff": diff})
+        return edges
+
+    def detect(sub_df, countries):
+        if not countries:
+            return {}
+        aff = _mutual_affinity(_affinity_input(sub_df), countries)
+        return _detect_blocs(aff, countries, q=0.6)
+
+    def flag_migrated(map1, map2):
+        g1, g2 = defaultdict(set), defaultdict(set)
+        for c, b in map1.items():
+            g1[b].add(c)
+        for c, b in map2.items():
+            g2[b].add(c)
+        migrated = set()
+        for c in set(map1) & set(map2):
+            m1 = g1[map1[c]] - {c}; m2 = g2[map2[c]] - {c}
+            if (len(m1 & m2) / len(m1)) < 0.5 if m1 else True:
+                migrated.add(c)
+        return migrated
+
+    def eligibility_frame(sub_df, countries):
+        cs = set(countries); rows = []
+        for yr, g in sub_df.groupby("year"):
+            pts = (set(g["src_label"]) | set(g["tgt_label"])) & cs
+            for s in pts:
+                for t in pts:
+                    if s != t: rows.append((yr, s, t))
+        if not rows:
+            return pd.DataFrame(columns=["year","src_label","tgt_label","points","nvs"])
+        elig = pd.DataFrame(rows, columns=["year","src_label","tgt_label"])
+        actual = sub_df.groupby(["year","src_label","tgt_label"], as_index=False)["points"].sum()
+        m = elig.merge(actual, on=["year","src_label","tgt_label"], how="left")
+        m["points"] = m["points"].fillna(0)
+        m["nvs"] = (m["points"] / m["year"].apply(_era_max)).clip(0, 1)
+        return m
+
+    def era_stats(sub_df, countries, edges):
+        mutual  = sorted([e for e in edges if e["kind"]=="mutual"],   key=lambda e: e["value"], reverse=True)[:3]
+        oneway  = sorted([e for e in edges if e["kind"]=="one_way"],  key=lambda e: e["diff"],  reverse=True)[:3]
+        elig = eligibility_frame(sub_df, countries)
+        if elig.empty:
+            return mutual, oneway, pd.DataFrame()
+        agg = elig.groupby(["src_label","tgt_label"]).agg(
+            years_eligible=("year","nunique"), mean_nvs=("nvs","mean")).reset_index()
+        rl = {(r["src_label"],r["tgt_label"]): r["mean_nvs"] for _,r in agg.iterrows()}
+        cands = agg[(agg["years_eligible"]>=hatred_min_years)&(agg["mean_nvs"]<hatred_epsilon)].copy()
+        if cands.empty:
+            return mutual, oneway, cands
+        cands["reciprocal_nvs"] = cands.apply(lambda r: rl.get((r["tgt_label"],r["src_label"]),0.0), axis=1)
+        return mutual, oneway, cands.sort_values(["years_eligible","reciprocal_nvs"],ascending=[False,False]).head(3)
+
+    def render_stat(fig, row, col, era_label, top_mutual, top_oneway, top_hatred):
+        fig.update_xaxes(visible=False, range=[0,1], row=row, col=col)
+        fig.update_yaxes(visible=False, range=[0,1], row=row, col=col)
+        mutual_lines  = [f"\U0001f91d {e['a']} \u2194 {e['b']}  (NVS {e['value']:.1f})" for e in top_mutual]  or ["—"]
+        oneway_lines  = [f"\u27a1\ufe0f {e['giver']} \u2192 {e['receiver']}  (\u0394{e['diff']:.1f})" for e in top_oneway] or ["—"]
+        hatred_lines  = (
+            [f"\u2744\ufe0f {r['src_label']} \u21cf {r['tgt_label']}  ({int(r['years_eligible'])} yrs)"
+             for _,r in top_hatred.iterrows()]
+            if top_hatred is not None and not top_hatred.empty else ["—"]
+        )
+        y = 0.95
+        fig.add_annotation(x=0.03, y=1.0, text=f"<b>{era_label}</b>", showarrow=False,
+            font=dict(size=13, color="#1f2937", family="Georgia, serif"),
+            xanchor="left", yanchor="top", row=row, col=col)
+        y -= 0.12
+        for heading, lines in [
+            ("Top mutual voters (NVS ≈ equal both ways)", mutual_lines),
+            ("Top one-way voters (strong asymmetry)", oneway_lines),
+            ("Cold-shoulder pairs (near-zero NVS)", hatred_lines),
+        ]:
+            fig.add_annotation(x=0.03, y=y, text=f"<b>{heading}</b>", showarrow=False,
+                font=dict(size=10, color="#374151"), xanchor="left", yanchor="top", row=row, col=col)
+            y -= 0.09
+            for line in lines[:3]:
+                fig.add_annotation(x=0.06, y=y, text=line, showarrow=False,
+                    font=dict(size=9, color="#4b5563"), xanchor="left", yanchor="top", row=row, col=col)
+                y -= 0.08
+            y -= 0.02
+
+    # ---- participation year lookups ----------------------------------------
+    part_total = participation.to_dict()
+    era1_part_df = pd.concat([
+        df[df["year"]<=1999][["year","src_label"]].rename(columns={"src_label":"country"}),
+        df[df["year"]<=1999][["year","tgt_label"]].rename(columns={"tgt_label":"country"}),
+    ]).drop_duplicates().groupby("country")["year"].nunique()
+    era2_part_df = pd.concat([
+        df[df["year"]>=2000][["year","src_label"]].rename(columns={"src_label":"country"}),
+        df[df["year"]>=2000][["year","tgt_label"]].rename(columns={"tgt_label":"country"}),
+    ]).drop_duplicates().groupby("country")["year"].nunique()
+    era1_part = era1_part_df.to_dict()
+    era2_part = era2_part_df.to_dict()
+
+    # ---- Tier 1: full history ----------------------------------------------
+    full_mat   = mean_nvs_matrix(df, qualified)
+    full_bloc  = detect(df, qualified)
+    full_edges = classify_edges(full_mat, qualified)
+    full_geo_c = _geo_heb_compute_bloc_centroids(full_bloc, coord_lookup)
+
+    # ---- Tier 2: two eras --------------------------------------------------
+    era1_df = df[df["year"]<=1999]
+    era2_df = df[df["year"]>=2000]
+    era1_countries = sorted({c for c in qualified if c in set(era1_df["src_label"])|set(era1_df["tgt_label"])})
+    era2_countries = sorted({c for c in qualified if c in set(era2_df["src_label"])|set(era2_df["tgt_label"])})
+    era1_mat   = mean_nvs_matrix(era1_df, era1_countries)
+    era2_mat   = mean_nvs_matrix(era2_df, era2_countries)
+    era1_bloc  = detect(era1_df, era1_countries)
+    era2_bloc  = detect(era2_df, era2_countries)
+    era1_edges = classify_edges(era1_mat, era1_countries)
+    era2_edges = classify_edges(era2_mat, era2_countries)
+    era1_geo_c = _geo_heb_compute_bloc_centroids(era1_bloc, coord_lookup)
+    era2_geo_c = _geo_heb_compute_bloc_centroids(era2_bloc, coord_lookup)
+
+    migrated = flag_migrated(era1_bloc, era2_bloc)
+
+    # Build migration ring colour lookup for Era-2
+    era1_bloc_names  = sorted(set(era1_bloc.values())) if era1_bloc else []
+    era1_bloc_color  = {b: _GEO_HEB_PALETTE[i%len(_GEO_HEB_PALETTE)] for i,b in enumerate(era1_bloc_names)}
+    migrated_ring_color = {
+        c: era1_bloc_color.get(era1_bloc.get(c), "#9ca3af")
+        for c in migrated if c in era1_bloc and c in era2_bloc
+    }
+
+    # ---- Tier 3: evidence --------------------------------------------------
+    top_m1, top_o1, top_h1 = era_stats(era1_df, era1_countries, era1_edges)
+    top_m2, top_o2, top_h2 = era_stats(era2_df, era2_countries, era2_edges)
+
+    # ---- panel title helper ------------------------------------------------
+    def _ptitle(prefix, countries, edges):
+        nm = sum(1 for e in edges if e["kind"]=="mutual")
+        no = len(edges)-nm
+        return (
+            f"{prefix}<br>"
+            f"<span style='font-size:11px;color:#6b7280;'>"
+            f"{len(countries)} countries \u00b7 {len(edges)} edges "
+            f"({nm} mutual \u2014, {no} one-way \u2508)</span>"
+        )
+
+    # ---- figure assembly ---------------------------------------------------
+    row_heights = [0.40, 0.32, 0.28]
+    vspacing    = 0.08
+    avail       = 1.0 - vspacing * 2
+    scaled      = [h * avail for h in row_heights]
+    boundaries  = []
+    cur         = 1.0
+    for h in scaled:
+        bot = cur - h
+        boundaries.append((cur, bot))
+        cur = bot - vspacing
+
+    fig = make_subplots(
+        rows=3, cols=2,
+        row_heights=row_heights,
+        vertical_spacing=vspacing,
+        horizontal_spacing=0.04,
+        specs=[
+            [{"type":"scattergeo","colspan":2}, None],
+            [{"type":"scattergeo"}, {"type":"scattergeo"}],
+            [{"type":"xy"}, {"type":"xy"}],
+        ],
+        subplot_titles=[
+            _ptitle("Full picture \u00b7 1975\u20132025", qualified, full_edges),
+            _ptitle("Era 1 \u00b7 1975\u20131999", era1_countries, era1_edges),
+            _ptitle("Era 2 \u00b7 2000\u20132025", era2_countries, era2_edges),
+            "Era 1 insights", "Era 2 insights",
+        ],
+    )
+
+    _geo_heb_render_panel(
+        fig, 1, 1, qualified, full_edges, full_bloc,
+        coord_lookup, full_geo_c,
+        part_years=part_total, beta=beta,
+        show_methodology_box=True,
+        diff_threshold=diff_threshold, top_k_out=top_k_out, min_nvs_strength=min_nvs_strength,
+    )
+    _geo_heb_render_panel(
+        fig, 2, 1, era1_countries, era1_edges, era1_bloc,
+        coord_lookup, era1_geo_c,
+        part_years=era1_part, migrated_gold=migrated, beta=beta,
+    )
+    _geo_heb_render_panel(
+        fig, 2, 2, era2_countries, era2_edges, era2_bloc,
+        coord_lookup, era2_geo_c,
+        part_years=era2_part, migrated_ring_color=migrated_ring_color, beta=beta,
+    )
+    render_stat(fig, 3, 1, "1975\u20131999", top_m1, top_o1, top_h1)
+    render_stat(fig, 3, 2, "2000\u20132025", top_m2, top_o2, top_h2)
+
+    # ---- dotted flow connectors --------------------------------------------
+    def add_connector(x, y_top, y_bot, label):
+        fig.add_shape(type="line", x0=x, y0=y_top-0.005, x1=x, y1=y_bot+0.018,
+            line=dict(dash="dot", color="#94a3b8", width=2), xref="paper", yref="paper")
+        fig.add_annotation(x=x, y=y_bot+0.014, text="\u25bc", showarrow=False,
+            xref="paper", yref="paper", font=dict(size=13, color="#94a3b8"))
+        fig.add_annotation(x=x, y=(y_top+y_bot)/2, text=label, showarrow=False,
+            xref="paper", yref="paper",
+            font=dict(size=10, color="#64748b", family="Georgia, serif"),
+            bgcolor="rgba(248,250,252,0.9)", borderpad=3)
+
+    g1t, g1b = boundaries[0][1], boundaries[1][0]
+    g2t, g2b = boundaries[1][1], boundaries[2][0]
+    add_connector(0.25, g1t, g1b, "splits into two eras")
+    add_connector(0.75, g1t, g1b, "splits into two eras")
+    add_connector(0.25, g2t, g2b, "reveals evidence")
+    add_connector(0.75, g2t, g2b, "reveals evidence")
+
+    # ---- reading guide (top-right, bordered card) -------------------------
+    fig.add_annotation(
+        x=0.99, y=1.065, xref="paper", yref="paper",
+        text=(
+            "<b>HOW TO READ THIS MAP</b><br>"
+            "<br>"
+            "<b>Node positions:</b> real lat/lon (geographic)<br>"
+            "<b>Node colour:</b> detected voting bloc<br>"
+            "<b>Node size:</b> years participated in this window<br>"
+            "<b>Large hub circle:</b> bloc geographic centroid<br>"
+            "<br>"
+            "<span style='color:rgb(13,148,136)'><b>━━━ Teal solid</b></span>"
+            " = Mutual NVS (both ways ≈ equal)<br>"
+            "<span style='color:rgb(220,86,60)'><b>┈┈┈ Coral dotted</b></span>"
+            " = One-way (hover for direction)<br>"
+            "Darker / thicker = stronger NVS<br>"
+            "<br>"
+            "<b>The bundling effect:</b> lines converge toward<br>"
+            "their bloc's geographic hub before diverging<br>"
+            "to the target country. Overlapping paths from<br>"
+            "the same region reveal voting corridors.<br>"
+            "<br>"
+            "<span style='color:#b45309'><b>Gold ring</b></span>"
+            " = country about to change bloc (Era 1)<br>"
+            "<b>Coloured ring</b> = shows previous bloc (Era 2)<br>"
+            "<br>"
+            f"<span style='font-size:8px;color:#94a3b8;'>"
+            f"\u03b2 = {beta:.2f} · NVS floor = {min_nvs_strength}/12<br>"
+            f"Holten (2006) IEEE TVCG 12(5):741-748</span>"
+        ),
+        showarrow=False, xanchor="right", yanchor="bottom",
+        font=dict(size=9, color="#374151"), align="right",
+        bgcolor="rgba(255,255,255,0.97)", bordercolor="#2a9d8f",
+        borderwidth=1.5, borderpad=10,
+    )
+
+    fig.update_layout(
+        title=dict(
+            text=(
+                "<b>Eurovision Voting Network \u00b7 Geographic Hierarchical Edge Bundling</b>"
+                "<br><span style='font-size:12px;color:#64748b;'>"
+                "Countries at real coordinates \u00b7 Bézier edges bundled through geographic bloc centroids "
+                "(\u03b2={beta:.2f}) \u00b7 Holten (2006) \u00b7 1975\u20132025"
+                "</span>"
+            ).format(beta=beta),
+            x=0.5, xanchor="center",
+            font=dict(size=17, family="Georgia, serif", color="#111827"),
+        ),
+        height=1680, width=1250,
+        paper_bgcolor="#f8fafc", plot_bgcolor="#f8fafc",
+        showlegend=False,
+        margin=dict(l=30, r=30, t=145, b=40),
+    )
+
+    explanation = f"""
+**Geographic Hierarchical Edge Bundling (Draft 10)**
+
+This draft applies the same Holten (2006) algorithm as Draft 9 but replaces
+the abstract circular layout with real geographic coordinates, answering the
+question: *does the voting bloc structure align with geographic regions?*
+
+**What you are seeing:**
+
+- **Large transparent circles (hubs):** the geographic centre-of-mass of each
+  detected Louvain voting bloc — the average lat/lon of all member countries.
+  These are the Bézier control points for the bundling; all edges from
+  countries in that bloc are pulled toward their bloc's hub before diverging
+  toward their destination.
+
+- **Solid teal lines ━━━ = Mutual relationship:** both countries give each
+  other similar NVS (|NVS(A→B) − NVS(B→A)| ≤ {diff_threshold}). The line
+  is routed through both blocs' geographic centroids, producing a visible
+  geographic corridor between voting regions.
+
+- **Dotted coral lines ┈┈┈ = One-way relationship:** one country gives
+  significantly more NVS than it receives. Hover for direction.
+
+- **Node size:** proportional to years participated in that panel's time
+  window (1975–2025 for Tier 1; 1975–1999 or 2000–2025 for era panels).
+
+- **Gold ring:** country whose voting bloc will change in the next era.
+  **Coloured ring (Era 2):** that same country's ring colour shows which
+  bloc it came from, while the fill shows its new bloc.
+
+**Why geographic layout adds insight beyond Draft 9:** the circular layout
+groups same-bloc countries adjacent to each other by construction, so the
+bundling is always visible. In the geographic layout, that same bundling
+has to *earn* its visual cluster by actually routing through a geographic
+region — if the Balkan bloc's centroid really does sit near the Adriatic
+and most edges involving Balkan countries route through that point, the
+visual confirms the geographic coherence of the bloc. If blocs were purely
+political/cultural with no geographic basis, the hubs would be scattered
+and the bundling would be diffuse rather than tightly regionally clustered.
+
+**Citation:** Holten, D.H.R. (2006). Hierarchical edge bundles: visualization
+of adjacency relations in hierarchical data. *IEEE Transactions on
+Visualization and Computer Graphics*, 12(5), 741–748.
+DOI: 10.1109/TVCG.2006.147
+
+**Edge selection:** top {top_k_out} outgoing NVS ties per country where
+NVS ≥ {min_nvs_strength}/12 (same NVS-strength-ranked approach as Drafts 7,
+9). Only qualifying countries with ≥ {min_years} years of participation
+and usable geographic coordinates are included.
+
+All thresholds ({diff_threshold} mutual/one-way, {min_nvs_strength} NVS floor,
+{min_years} years minimum, β = {beta:.2f} bundling strength) are exploratory
+cutoffs chosen for visual and narrative clarity.
+"""
+    return fig, "Geographic HEB — Nodes on Real Map", explanation
+
+# =============================================================================
+# DIAGRAM 11 — SPLIT-TRIANGLE ADJACENCY MATRIX  ("One Matrix, Two Eras")
+# =============================================================================
+#
+# Inspired by the "1c" concept from the Eurovision Blocs Claude-Design artifact:
+# a single square NVS matrix where the SAME country ordering is shared between
+# two eras.  The lower-left triangle shows Era I (1975–1999) and the upper-right
+# triangle shows Era II (2000–2025).  The diagonal is shaded neutral.
+#
+# Visual encoding:
+#   • Cell colour   = bloc of the ROW country (same palette as other drafts)
+#   • Cell opacity  = NVS strength (0 → transparent, max → fully saturated)
+#   • Grey stipple  = country not yet participating / absent in that era cell
+#   • Diagonal      = dark neutral (self-vote impossible)
+#   • Bloc boundary lines drawn as thin rectangles around the bloc sub-squares
+#
+# Country ordering: sorted by detected Louvain bloc (full history) then
+# alphabetically within each bloc, so bloc sub-squares appear as compact
+# coloured blocks along the diagonal — exactly like the D3 "mobility matrix"
+# pattern.
+#
+# Two annotation callouts (paper coordinates) mirror the original design:
+#   ① pointing to the upper-right: "ERA II — new blocs emerge"
+#   ② pointing to the lower-left: "ERA I — sparse, Western-dominated"
+# =============================================================================
+
+
+def build_split_triangle_matrix(
+    df: pd.DataFrame,
+    id2label: dict,
+    nodes_df: pd.DataFrame,
+    min_years_overall: int = 10,
+    min_years_per_half: int = 3,
+    dark_theme: bool = False,
+):
+    """
+    DRAFT 11 — Split-triangle adjacency matrix.
+
+    One square matrix, two eras in opposite triangles.  Country rows/columns
+    are sorted by detected Louvain bloc (full-history affinity) then
+    alphabetically within each bloc, so same-bloc relationships appear as
+    dense coloured blocks along the diagonal.
+
+    Returns (figure, title, explanation_markdown).
+    """
+    from collections import defaultdict
+
+    # ---- data prep -----------------------------------------------------------
+    df = _add_era_max_col(df)
+    df["src_label"] = df["source"].map(id2label).fillna(df["source"])
+    df["tgt_label"] = df["target"].map(id2label).fillna(df["target"])
+
+    participation_all = (
+        pd.concat([
+            df[["year", "src_label"]].rename(columns={"src_label": "country"}),
+            df[["year", "tgt_label"]].rename(columns={"tgt_label": "country"}),
+        ]).drop_duplicates().groupby("country")["year"].nunique()
+    )
+
+    era1_df = df[df["year"] <= 1999]
+    era2_df = df[df["year"] >= 2000]
+
+    era1_part = (
+        pd.concat([
+            era1_df[["year", "src_label"]].rename(columns={"src_label": "country"}),
+            era1_df[["year", "tgt_label"]].rename(columns={"tgt_label": "country"}),
+        ]).drop_duplicates().groupby("country")["year"].nunique()
+    )
+    era2_part = (
+        pd.concat([
+            era2_df[["year", "src_label"]].rename(columns={"src_label": "country"}),
+            era2_df[["year", "tgt_label"]].rename(columns={"tgt_label": "country"}),
+        ]).drop_duplicates().groupby("country")["year"].nunique()
+    )
+
+    # Qualify countries with enough overall participation
+    qualified = sorted(
+        participation_all[participation_all >= min_years_overall].index.tolist()
+    )
+    df_q = df[df["src_label"].isin(qualified) & df["tgt_label"].isin(qualified)]
+
+    if df_q.empty or len(qualified) < 3:
+        return None, "Split-Triangle Matrix", "Not enough countries to build this draft."
+
+    # ---- bloc detection (full history, for ordering) -------------------------
+    aff = _mutual_affinity(_affinity_input(df_q), qualified)
+    bloc_map = _detect_blocs(aff, qualified, q=0.6)
+
+    # Sort countries: blocs by descending size, then alpha within each bloc
+    bloc_members = defaultdict(list)
+    for c, b in bloc_map.items():
+        if c in qualified:
+            bloc_members[b].append(c)
+    blocs_by_size = sorted(bloc_members.keys(), key=lambda b: -len(bloc_members[b]))
+    order = []
+    for b in blocs_by_size:
+        order.extend(sorted(bloc_members[b]))
+    n = len(order)
+
+    # ---- NVS matrices per era ------------------------------------------------
+    def mean_nvs_mat(sub_df, countries):
+        if sub_df.empty:
+            return pd.DataFrame(0.0, index=countries, columns=countries)
+        return (
+            sub_df.groupby(["src_label", "tgt_label"])["nvs"].mean()
+            .unstack(fill_value=0)
+            .reindex(index=countries, columns=countries, fill_value=0)
+        ) * 12.0  # 0-12 scale
+
+    m1 = mean_nvs_mat(era1_df[era1_df["src_label"].isin(order) & era1_df["tgt_label"].isin(order)], order)
+    m2 = mean_nvs_mat(era2_df[era2_df["src_label"].isin(order) & era2_df["tgt_label"].isin(order)], order)
+
+    # Absent flags per era (too few years to be meaningful)
+    absent1 = {c for c in order if era1_part.get(c, 0) < min_years_per_half}
+    absent2 = {c for c in order if era2_part.get(c, 0) < min_years_per_half}
+
+    # ---- colour palette (matches other drafts) --------------------------------
+    PALETTE = [
+        "#1f4e79", "#d1495b", "#2a9d8f", "#f4a261",
+        "#6a4c93", "#7f5539", "#577590", "#3a86ff",
+    ]
+    bloc_color = {b: PALETTE[i % len(PALETTE)] for i, b in enumerate(blocs_by_size)}
+
+    if dark_theme:
+        bg_color    = "#0f1217"
+        diag_color  = "rgba(238,242,248,0.18)"
+        absent_rgba = "rgba(238,242,248,0.06)"
+        border_rgba = "rgba(238,242,248,0.22)"
+        label_color = "rgba(220,227,238,0.85)"
+        title_color = "#eef2f8"
+        paper_bg    = "#0f1217"
+    else:
+        bg_color    = "#f7f4ee"
+        diag_color  = "rgba(32,36,43,0.16)"
+        absent_rgba = "rgba(32,36,43,0.05)"
+        border_rgba = "rgba(32,36,43,0.30)"
+        label_color = "rgba(32,36,43,0.72)"
+        title_color = "#20242b"
+        paper_bg    = "#f7f4ee"
+
+    def hex_rgba(hx, alpha):
+        h = hx.lstrip("#")
+        r, g, b_ = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+        return f"rgba({r},{g},{b_},{alpha:.2f})"
+
+    # ---- build figure --------------------------------------------------------
+    # We use a square axis (x = column index, y = row index inverted)
+    # Lower-left (r > c) = Era I, upper-right (r < c) = Era II
+    CELL = 1.0  # unit size per cell
+
+    fig = go.Figure()
+
+    # Background rectangle
+    fig.add_shape(
+        type="rect", x0=-0.02, y0=-0.02, x1=n * CELL + 0.02, y1=n * CELL + 0.02,
+        fillcolor=bg_color, line=dict(width=0),
+        layer="below",
+    )
+
+    max_nvs = 12.0
+
+    # Cell rectangles
+    for ri, row_c in enumerate(order):
+        for ci, col_c in enumerate(order):
+            x0, x1 = ci * CELL, (ci + 1) * CELL
+            y0, y1 = (n - 1 - ri) * CELL, (n - ri) * CELL  # y-axis inverted
+
+            if ri == ci:
+                # Diagonal
+                fill = diag_color
+            elif ri > ci:
+                # Lower-left = Era I
+                if row_c in absent1 or col_c in absent1:
+                    fill = absent_rgba
+                else:
+                    nvs = float(m1.loc[row_c, col_c])
+                    alpha = 0.06 + 0.70 * min(nvs / max_nvs, 1.0)
+                    fill = hex_rgba(bloc_color[bloc_map[row_c]], alpha)
+            else:
+                # Upper-right = Era II
+                if row_c in absent2 or col_c in absent2:
+                    fill = absent_rgba
+                else:
+                    nvs = float(m2.loc[row_c, col_c])
+                    alpha = 0.06 + 0.70 * min(nvs / max_nvs, 1.0)
+                    fill = hex_rgba(bloc_color[bloc_map[row_c]], alpha)
+
+            ht_era = "Era I (1975–1999)" if ri > ci else "Era II (2000–2025)" if ri < ci else "Diagonal"
+            if ri != ci:
+                nvs_val = float(m1.loc[row_c, col_c]) if ri > ci else float(m2.loc[row_c, col_c])
+                hover = (
+                    f"<b>{row_c}</b> → <b>{col_c}</b><br>"
+                    f"{ht_era}<br>"
+                    f"NVS: {nvs_val:.2f} / 12"
+                )
+            else:
+                hover = row_c
+
+            fig.add_shape(
+                type="rect", x0=x0 + 0.02, y0=y0 + 0.02, x1=x1 - 0.02, y1=y1 - 0.02,
+                fillcolor=fill, line=dict(width=0),
+            )
+            # Invisible scatter for hover
+            fig.add_trace(go.Scatter(
+                x=[(x0 + x1) / 2], y=[(y0 + y1) / 2],
+                mode="markers",
+                marker=dict(size=CELL * 10, color="rgba(0,0,0,0)", symbol="square"),
+                hovertemplate=hover + "<extra></extra>",
+                showlegend=False,
+            ))
+
+    # Bloc boundary rectangles
+    cursor = 0
+    for b in blocs_by_size:
+        sz = len(bloc_members[b])
+        x0 = cursor * CELL
+        y0 = (n - cursor - sz) * CELL
+        x1 = (cursor + sz) * CELL
+        y1 = (n - cursor) * CELL
+        fig.add_shape(
+            type="rect", x0=x0, y0=y0, x1=x1, y1=y1,
+            line=dict(color=border_rgba, width=1.5),
+            fillcolor="rgba(0,0,0,0)",
+        )
+        # Bloc label on diagonal
+        mid = cursor + sz / 2
+        fig.add_annotation(
+            x=mid * CELL, y=(n - mid) * CELL,
+            text=f"<b>{b}</b>",
+            showarrow=False,
+            font=dict(size=7.5, color=bloc_color[b]),
+            xanchor="center", yanchor="middle",
+        )
+        cursor += sz
+
+    # Diagonal line
+    fig.add_shape(
+        type="line", x0=0, y0=n * CELL, x1=n * CELL, y1=0,
+        line=dict(color=border_rgba, width=1, dash="dot"),
+    )
+
+    # Country labels (bottom and left, sampled for readability)
+    label_every = max(1, n // 30)
+    for i, c in enumerate(order):
+        if i % label_every != 0:
+            continue
+        xi = (i + 0.5) * CELL
+        yi_row = (n - i - 0.5) * CELL
+        # Bottom label (column)
+        fig.add_annotation(x=xi, y=-0.3, text=c, showarrow=False,
+                            font=dict(size=6.5, color=label_color),
+                            xanchor="center", yanchor="top", textangle=-60)
+        # Left label (row)
+        fig.add_annotation(x=-0.3, y=yi_row, text=c, showarrow=False,
+                            font=dict(size=6.5, color=label_color),
+                            xanchor="right", yanchor="middle")
+
+    # Era labels on the triangles
+    fig.add_annotation(
+        x=n * CELL * 0.82, y=n * CELL * 0.82,
+        text="<b>ERA II</b><br>2000–2025",
+        showarrow=False, font=dict(size=12, color=title_color, family="Georgia, serif"),
+        xanchor="center", yanchor="middle",
+    )
+    fig.add_annotation(
+        x=n * CELL * 0.18, y=n * CELL * 0.18,
+        text="<b>ERA I</b><br>1975–1999",
+        showarrow=False, font=dict(size=12, color=title_color, family="Georgia, serif"),
+        xanchor="center", yanchor="middle",
+    )
+
+    # Key insight annotations (callouts)
+    fig.add_annotation(
+        x=n * CELL * 0.70, y=n * CELL * 0.30,
+        text=(
+            "<b>New blocs emerge</b><br>"
+            "Post-Soviet & Balkan clusters<br>"
+            "form dense coloured squares<br>"
+            "only in the right triangle"
+        ),
+        showarrow=True, arrowhead=2, arrowcolor=title_color, arrowwidth=1.2,
+        ax=50, ay=-40,
+        font=dict(size=8.5, color=title_color),
+        bgcolor=paper_bg, bordercolor=border_rgba, borderwidth=1, borderpad=6,
+        xanchor="left",
+    )
+    fig.add_annotation(
+        x=n * CELL * 0.30, y=n * CELL * 0.70,
+        text=(
+            "<b>Western dominance, 1975–1999</b><br>"
+            "Left triangle sparser;<br>"
+            "only Western & Mediterranean<br>"
+            "blocs have strong sub-squares"
+        ),
+        showarrow=True, arrowhead=2, arrowcolor=title_color, arrowwidth=1.2,
+        ax=-50, ay=40,
+        font=dict(size=8.5, color=title_color),
+        bgcolor=paper_bg, bordercolor=border_rgba, borderwidth=1, borderpad=6,
+        xanchor="right",
+    )
+
+    # Legend (coloured squares per bloc)
+    legend_y = -1.8
+    for idx, b in enumerate(blocs_by_size):
+        lx = idx * (n * CELL / len(blocs_by_size)) + 0.5
+        fig.add_shape(
+            type="rect",
+            x0=lx, y0=legend_y - 0.3, x1=lx + 0.7, y1=legend_y + 0.3,
+            fillcolor=bloc_color[b], line=dict(width=0),
+        )
+        members_str = ", ".join(sorted(bloc_members[b])[:4])
+        if len(bloc_members[b]) > 4:
+            members_str += f" +{len(bloc_members[b])-4}"
+        fig.add_annotation(
+            x=lx + 0.85, y=legend_y,
+            text=f"<b>{b}</b>  {members_str}",
+            showarrow=False, xanchor="left", yanchor="middle",
+            font=dict(size=7, color=label_color),
+        )
+
+    # Reading guide
+    fig.add_annotation(
+        x=n * CELL, y=n * CELL + 0.5,
+        text=(
+            "<b>Reading guide:</b> lower-left triangle = Era I (1975–1999) · "
+            "upper-right = Era II (2000–2025) · "
+            "cell colour = row country's voting bloc · "
+            "opacity = NVS strength · grey = country absent in that era"
+        ),
+        showarrow=False, xanchor="right", yanchor="bottom",
+        font=dict(size=8.5, color=label_color), align="right",
+        bgcolor=paper_bg, bordercolor=border_rgba, borderwidth=1, borderpad=6,
+    )
+
+    fig.update_layout(
+        title=dict(
+            text=(
+                "<b>One Matrix, Two Eras — Eurovision Voting Affinity</b>"
+                "<br><span style='font-size:12px;color:#6b7280;'>"
+                "Countries ordered by detected voting bloc · "
+                "lower-left = 1975–1999 · upper-right = 2000–2025 · "
+                f"{'Dark theme' if dark_theme else 'Light theme'}"
+                "</span>"
+            ),
+            x=0.5, xanchor="center",
+            font=dict(size=16, family="Georgia, serif", color=title_color),
+        ),
+        xaxis=dict(visible=False, range=[-2.5, n * CELL + 1.5]),
+        yaxis=dict(visible=False, range=[-2.8, n * CELL + 1.5], scaleanchor="x", scaleratio=1),
+        height=max(900, n * 18 + 300),
+        width=max(960, n * 18 + 300),
+        paper_bgcolor=paper_bg, plot_bgcolor=paper_bg,
+        showlegend=False,
+        margin=dict(l=120, r=60, t=120, b=120),
+    )
+
+    n_era1 = len([c for c in order if c not in absent1])
+    n_era2 = len([c for c in order if c not in absent2])
+
+    explanation = f"""
+**Concept source:** Design variant "1c" from the *Eurovision Blocs* Claude-Design
+artifact, adapted here from placeholder SVG data to your real NVS dataset.
+
+**What this shows:** a single adjacency matrix where rows and columns represent
+the same set of qualifying countries (≥{min_years_overall} years total
+participation), ordered by detected Louvain voting bloc (largest bloc first,
+alphabetical within each bloc). The diagonal divides the matrix into two
+triangles — **lower-left = Era I (1975–1999)** and
+**upper-right = Era II (2000–2025)** — so bloc formation and dissolution is
+legible at a glance without side-by-side panels.
+
+**How to read it:** each cell (row A, col B) in the lower-left shows the mean
+NVS(A→B) from 1975–1999; the symmetric cell in the upper-right shows the same
+pair's mean NVS(A→B) from 2000–2025. Cell **colour** encodes the row country's
+voting bloc; **opacity** encodes NVS strength (transparent = near-zero, fully
+saturated = maximum voting affinity). Grey/transparent cells indicate countries
+absent from that era (fewer than {min_years_per_half} years of participation).
+
+**What to look for:** along-diagonal bloc sub-squares that are more saturated in
+the upper-right triangle than the lower-left reveal blocs that **intensified**
+after 2000 (historically: Post-Soviet and Balkan clusters). Sub-squares visible
+only in the lower-left but absent or faint in the upper-right reveal blocs that
+**dissolved**. Off-diagonal colour visible in one triangle but not the other
+reveals cross-bloc relationships that opened up or closed after 2000.
+
+**Countries shown:** {n} qualifying countries; {n_era1} active in Era I,
+{n_era2} active in Era II.
+
+**Thesis placement:** this is an alternative to the node-link diagrams for
+Section 4.3 (Layout Strategy) — cite Ghoniem et al. (2004) [already in your
+bibliography] for the matrix vs. node-link readability argument: matrix
+representations scale more gracefully when N is large (here ~{n} countries)
+and the reader's primary task is finding dense sub-groups rather than tracing
+individual paths.
+"""
+    return fig, "Split-Triangle Matrix — One Matrix, Two Eras", explanation
