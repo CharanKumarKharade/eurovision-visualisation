@@ -531,19 +531,52 @@ def load_data(nodes_file: str, edges_file: str):
 
 nodes, edges, id2label, src_col, tgt_col, pts_col = load_data(NODES_FILE, EDGES_FILE)
 
+@st.cache_data
+def load_raw_edges(edges_file: str) -> pd.DataFrame:
+    """
+    Load the FULL edges CSV without filtering score_type to 'total'.
+    Needed for Draft 15 (Jury vs Public Divergence) which requires
+    separate jury and televote rows.  Filters to round==final only.
+    """
+    raw = pd.read_csv(edges_file)
+    raw.columns = [c.strip().lower() for c in raw.columns]
+    for col in ["score_type", "round", "category", "source", "target"]:
+        if col in raw.columns:
+            raw[col] = raw[col].astype(str).str.strip().str.lower()
+    if "round" in raw.columns and "final" in raw["round"].unique():
+        raw = raw[raw["round"] == "final"]
+    # Rename points column
+    numeric_cols = [c for c in raw.columns if pd.api.types.is_numeric_dtype(raw[c])]
+    pts_col_raw = next((c for c in numeric_cols
+                        if any(k in c.lower() for k in ["point","score","pts","value","weight"])),
+                       None)
+    if pts_col_raw and pts_col_raw != "points":
+        raw = raw.rename(columns={pts_col_raw: "points"})
+    return raw
+
+raw_edges = load_raw_edges(EDGES_FILE)
+
 all_years_available = sorted(edges["year"].unique())
 ROOT_START = max(ROOT_START, min(all_years_available))
 ROOT_END = min(ROOT_END, max(all_years_available))
 
+# =============================================================================
+# BLOC PRECOMPUTATION — runs ONCE per server process, cached forever
+# =============================================================================
+
+@st.cache_resource(show_spinner="Precomputing voting blocs… (once per session)")
+def _warm_bloc_cache():
+    if not DRAFTVIZ_OK:
+        return {"skipped": True}
+    return draftviz.precompute_blocs(edges.copy(), id2label, min_years=10)
+
+_bloc_precompute_summary = _warm_bloc_cache()
+
 st.info(
     f"ℹ️ **Data scope for this app:** every chart, table, and statistic here "
     f"is computed using Eurovision voting data from **{ROOT_START} to "
-    f"{ROOT_END}** only ({ROOT_END - ROOT_START + 1} contest years). This "
-    f"includes the main voting matrix, community/bloc detection, period "
-    f"comparisons, the country voter drill-down ('top voters'), and the "
-    f"pair trend analysis further down the page. Data from years outside "
-    f"this range — if present in the source file — is never loaded or "
-    f"used anywhere in this app."
+    f"{ROOT_END}** only ({ROOT_END - ROOT_START + 1} contest years). "
+    "Data from years outside this range is never loaded or used."
 )
 
 
@@ -552,20 +585,113 @@ st.info(
 # =============================================================================
 
 DRAFT_REGISTRY = {
-    "— None (show main app) —": None,
-    "1. Unrequited Love — Voting Asymmetry":          "unrequited_love",
-    "2. The Neighbour Effect":                        "neighbour_effect",
-    "3. Alliance Lifespan Arcs":                      "lifespan_arcs",
-    "4. Rise and Fall — Era Dominance":               "rise_and_fall",
-    "5. Voting Hall of Fame":                         "hall_of_fame",
-    "6. Bloc Migration Sankey":                       "bloc_migration_sankey",
-    "7. Hierarchical Bloc Structure (Storyboard)":    "hierarchical_bloc_poster",
-    "8. Geographic Bloc Migration Poster":            "geo_bloc_migration_poster",
-    "9. Circular HEB — Hierarchical Edge Bundling":   "circular_heb_poster",
-    "10. Geographic HEB — Nodes on World Map":         "geographic_heb_poster",
-    "11. Split-Triangle Matrix — One Matrix, Two Eras": "split_triangle_matrix",
-    "11b. Split-Triangle Matrix (dark theme)":          "split_triangle_matrix_dark",
+    "— None (show main app) —":                        None,
+    "1. Unrequited Love — Voting Asymmetry":            "unrequited_love",
+    "2. The Neighbour Effect":                          "neighbour_effect",
+    "3. Alliance Lifespan Arcs":                        "lifespan_arcs",
+    "4. Rise and Fall — Era Dominance":                 "rise_and_fall",
+    "5. Voting Hall of Fame":                           "hall_of_fame",
+    "6. Bloc Migration Sankey":                         "bloc_migration_sankey",
+    "7. Hierarchical Bloc Structure (Storyboard)":      "hierarchical_bloc_poster",
+    "8. Geographic Bloc Migration Poster":              "geo_bloc_migration_poster",
+    "9. Circular HEB — Hierarchical Edge Bundling":     "circular_heb_poster",
+    "10. Geographic HEB — Nodes on World Map":          "geographic_heb_poster",
+    "11. Split-Triangle Matrix (light)":                "split_triangle_matrix",
+    "11b. Split-Triangle Matrix (dark)":                "split_triangle_matrix_dark",
+    "12. Radial Tidy Tree + HEB":                       "radial_tidy_tree",
+    "13. Geographic Story Map — Five Acts":             "story_map",
+    "14. Bloc Territory Map — Who Dominated?":          "bloc_territory_map",
+    "15. Jury vs Public — Divergence Network":          "jury_public_divergence",
 }
+
+# ---------------------------------------------------------------------------
+# @st.cache_data wraps every draft builder so that the ENTIRE Plotly figure
+# is cached after the first render.  Subsequent loads (page refresh, sidebar
+# change, switching back to the same draft) return the cached figure instantly
+# without rebuilding.  The cache key includes `_data_fp` — a lightweight
+# fingerprint of the source data — so the cache invalidates if the CSV changes.
+# ---------------------------------------------------------------------------
+
+def _data_fingerprint() -> str:
+    """Cheap fingerprint of the edges DataFrame for cache key use."""
+    return f"{len(edges)}_{int(edges['year'].max())}_{int(edges['points'].sum())}"
+
+
+@st.cache_data(show_spinner=False, ttl=None)
+def _build_draft(draft_key: str, _data_fp: str):
+    """
+    Build and cache a draft figure.  First call computes the figure;
+    every subsequent call within the same Streamlit server process returns
+    the cached result instantly.
+
+    `_data_fp` is a lightweight fingerprint of the source data so the cache
+    invalidates correctly if the CSV is reloaded.  Prefixing with `_` makes
+    Streamlit include it in the cache key but skip trying to hash it.
+    """
+    df = edges.copy()
+
+    if draft_key == "unrequited_love":
+        return draftviz.build_unrequited_love(df, id2label, min_years=15, top_n_arcs=40)
+
+    elif draft_key == "neighbour_effect":
+        return draftviz.build_neighbour_effect(df, id2label, nodes, min_years=15, n_labels=8)
+
+    elif draft_key == "lifespan_arcs":
+        return draftviz.build_lifespan_arcs(df, id2label, min_years=15, threshold=0.35, top_n=35)
+
+    elif draft_key == "rise_and_fall":
+        return draftviz.build_rise_and_fall(df, id2label, min_years=10, decade_size=10, top_supporters=5)
+
+    elif draft_key == "hall_of_fame":
+        return draftviz.build_hall_of_fame(df, id2label, min_years=15)
+
+    elif draft_key == "bloc_migration_sankey":
+        return draftviz.build_bloc_migration_sankey(df, id2label, min_years=25, affinity_q=0.65)
+
+    elif draft_key == "hierarchical_bloc_poster":
+        return draftviz.build_hierarchical_bloc_poster(
+            df, id2label, nodes, min_years=10, top_k_out=3, min_nvs_strength=2.0)
+
+    elif draft_key == "geo_bloc_migration_poster":
+        return draftviz.build_geo_bloc_migration_poster(
+            df, id2label, nodes,
+            min_years=15, min_years_per_half=5,
+            disparity_alpha=0.05, min_nvs_strength=1.5)
+
+    elif draft_key == "circular_heb_poster":
+        return draftviz.build_circular_heb_poster(
+            df, id2label, nodes,
+            min_years=10, top_k_out=3, min_nvs_strength=2.0, beta=0.80)
+
+    elif draft_key == "geographic_heb_poster":
+        return draftviz.build_geographic_heb_poster(
+            df, id2label, nodes,
+            min_years=10, top_k_out=3, min_nvs_strength=2.0, beta=0.80)
+
+    elif draft_key == "split_triangle_matrix":
+        return draftviz.build_split_triangle_matrix(
+            df, id2label, nodes, min_years_overall=10, dark_theme=False)
+
+    elif draft_key == "split_triangle_matrix_dark":
+        return draftviz.build_split_triangle_matrix(
+            df, id2label, nodes, min_years_overall=10, dark_theme=True)
+
+    elif draft_key == "radial_tidy_tree":
+        return draftviz.build_radial_tidy_tree(
+            df, id2label, nodes, min_years=10)
+    elif draft_key == "story_map":
+        return draftviz.build_story_map(
+            df, id2label, nodes, min_years=15, top_n=5)
+    elif draft_key == "bloc_territory_map":
+        return draftviz.build_bloc_territory_map(
+            df, id2label, nodes, min_years=10)
+    elif draft_key == "jury_public_divergence":
+        # raw_edges contains jury + televote rows (not filtered to total)
+        return draftviz.build_jury_public_divergence(
+            raw_edges, id2label, nodes, min_years=3, top_n=8)
+
+    return None, "Unknown draft", "Unknown draft key."
+
 
 if "active_draft" not in st.session_state:
     st.session_state["active_draft"] = None
@@ -574,9 +700,9 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### 🎨 Draft visualisations (GD Contest 2026)")
     st.caption(
-        "Ten standalone poster-draft diagrams, each using a different "
-        "analytical lens on the same 1975–2025 NVS data. Pick one to view "
-        "it full-page; use 'Back to main app' there to return here."
+        "Twelve standalone poster-draft diagrams built on 1975–2025 NVS data. "
+        "Figures are cached after first load — switching back to a previously "
+        "viewed draft is instant."
     )
     draft_choice_label = st.selectbox(
         "View a draft visualisation",
@@ -595,8 +721,7 @@ def _render_draft_header(title: str, explanation_md: str):
     st.title(f"📊 Draft: {title}")
     st.caption(
         f"Data scope: Eurovision {ROOT_START}–{ROOT_END} only. "
-        f"This is a standalone draft for the Graph Drawing Contest 2026 poster — "
-        f"it is computed independently from the sidebar filters on the main app."
+        "Standalone draft for the Graph Drawing Contest 2026 poster."
     )
     st.markdown(explanation_md)
     if st.button("⬅ Back to main app", key=f"back_btn_{title}"):
@@ -610,81 +735,25 @@ if st.session_state.get("active_draft") is not None:
 
     if not DRAFTVIZ_OK:
         st.error(
-            f"Could not load draft_visualizations.py. "
-            "Make sure draft_visualizations.py is in the same folder as this app. "
-            f"Import error: {_draftviz_import_error if '_draftviz_import_error' in dir() else 'unknown'}"
+            "Could not load draft_visualizations.py. "
+            "Make sure it is in the same folder as app.py."
         )
         if st.button("⬅ Back to main app"):
             st.session_state["active_draft"] = None
             st.rerun()
         st.stop()
 
-    draft_df_full = edges.copy()
+    _fp = _data_fingerprint()
+    # Show a spinner only on the first build (cache miss); subsequent loads are instant.
+    _already_cached = _build_draft.cache_info().currsize > 0 if hasattr(_build_draft, 'cache_info') else False
 
-    with st.spinner("Building draft visualisation — this can take a few seconds for community detection..."):
-
-        if _draft_key == "unrequited_love":
-            fig, title, explanation = draftviz.build_unrequited_love(
-                draft_df_full, id2label, min_years=15, top_n_arcs=40
-            )
-        elif _draft_key == "neighbour_effect":
-            fig, title, explanation = draftviz.build_neighbour_effect(
-                draft_df_full, id2label, nodes, min_years=15, n_labels=8
-            )
-        elif _draft_key == "lifespan_arcs":
-            fig, title, explanation = draftviz.build_lifespan_arcs(
-                draft_df_full, id2label, min_years=15, threshold=0.35, top_n=35
-            )
-        elif _draft_key == "rise_and_fall":
-            fig, title, explanation = draftviz.build_rise_and_fall(
-                draft_df_full, id2label, min_years=10, decade_size=10, top_supporters=5
-            )
-        elif _draft_key == "hall_of_fame":
-            fig, title, explanation = draftviz.build_hall_of_fame(
-                draft_df_full, id2label, min_years=15
-            )
-        elif _draft_key == "bloc_migration_sankey":
-            fig, title, explanation = draftviz.build_bloc_migration_sankey(
-                draft_df_full, id2label, min_years=25, affinity_q=0.65
-            )
-        elif _draft_key == "hierarchical_bloc_poster":
-            fig, title, explanation = draftviz.build_hierarchical_bloc_poster(
-                draft_df_full, id2label, nodes,
-                min_years=10, top_k_out=3, min_nvs_strength=2.0
-            )
-        elif _draft_key == "geo_bloc_migration_poster":
-            fig, title, explanation = draftviz.build_geo_bloc_migration_poster(
-                draft_df_full, id2label, nodes,
-                min_years=15, min_years_per_half=5,
-                disparity_alpha=0.05, min_nvs_strength=1.5
-            )
-        elif _draft_key == "circular_heb_poster":
-            fig, title, explanation = draftviz.build_circular_heb_poster(
-                draft_df_full, id2label, nodes,
-                min_years=10, top_k_out=3, min_nvs_strength=2.0, beta=0.80
-            )
-        elif _draft_key == "geographic_heb_poster":
-            fig, title, explanation = draftviz.build_geographic_heb_poster(
-                draft_df_full, id2label, nodes,
-                min_years=10, top_k_out=3, min_nvs_strength=2.0, beta=0.80
-            )
-        elif _draft_key == "split_triangle_matrix":
-            fig, title, explanation = draftviz.build_split_triangle_matrix(
-                draft_df_full, id2label, nodes,
-                min_years_overall=10, dark_theme=False
-            )
-        elif _draft_key == "split_triangle_matrix_dark":
-            fig, title, explanation = draftviz.build_split_triangle_matrix(
-                draft_df_full, id2label, nodes,
-                min_years_overall=10, dark_theme=True
-            )
-        else:
-            fig, title, explanation = None, "Unknown draft", "Unknown draft key."
+    with st.spinner("Building draft… (cached after first load)"):
+        fig, title, explanation = _build_draft(_draft_key, _fp)
 
     _render_draft_header(title, explanation)
 
     if fig is None:
-        st.warning("This draft could not be generated with the current data/filters.")
+        st.warning("This draft could not be generated with the current data.")
     else:
         st.plotly_chart(fig, use_container_width=True)
 
