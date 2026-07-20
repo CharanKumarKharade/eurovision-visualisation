@@ -602,6 +602,8 @@ DRAFT_REGISTRY = {
     "13. Geographic Story Map — Five Acts":             "story_map",
     "14. Bloc Territory Map — Who Dominated?":          "bloc_territory_map",
     "15. Jury vs Public — Divergence Network":          "jury_public_divergence",
+    "16. GD Contest 2026 Poster — Voting Communities":  "gd_contest_poster",
+    "17. Community Patterns Map":                       "community_patterns_map",
 }
 
 # ---------------------------------------------------------------------------
@@ -690,6 +692,14 @@ def _build_draft(draft_key: str, _data_fp: str):
         return draftviz.build_jury_public_divergence(
             raw_edges, id2label, nodes, min_years=3, top_n=8)
 
+    elif draft_key == "gd_contest_poster":
+        return draftviz.build_gd_contest_poster(
+            df, id2label, nodes, min_years=15, top_edges_per_category=4)
+
+    elif draft_key == "community_patterns_map":
+        return draftviz.build_community_patterns_map(
+            df, id2label, nodes, min_years=15, max_cross_bloc_edges=12)
+
     return None, "Unknown draft", "Unknown draft key."
 
 
@@ -700,7 +710,7 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### 🎨 Draft visualisations (GD Contest 2026)")
     st.caption(
-        "Twelve standalone poster-draft diagrams built on 1975–2025 NVS data. "
+        "Seventeen standalone poster-draft diagrams built on 1975–2025 NVS data. "
         "Figures are cached after first load — switching back to a previously "
         "viewed draft is instant."
     )

@@ -1,29 +1,19 @@
 #!/usr/bin/env python3
 """
-build_poster.py
-===============
-ONE-FILE solution — no other files needed except poster_data.json.
-
-Usage:
-    cd /workspaces/eurovision-visualisation
-    python build_poster.py
-
-Output: poster_standalone.html  (open this in Chrome)
+build_poster.py — ONE-FILE solution.
+Usage:  python build_poster.py
+Output: poster_standalone.html  (open in Chrome)
 """
 import json, sys, os
 
 if not os.path.exists("poster_data.json"):
-    sys.exit(
-        "ERROR: poster_data.json not found.\n"
-        "Run first:  python poster_data_export.py"
-    )
+    sys.exit("ERROR: poster_data.json not found.\nRun first: python poster_data_export.py")
 
 with open("poster_data.json", encoding="utf-8") as f:
     data = json.load(f)
 
 data_js = "const POSTER_DATA = " + json.dumps(data, ensure_ascii=False) + ";\n"
 
-# HTML template is embedded below — no poster.html needed
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -574,7 +564,9 @@ with open("poster_standalone.html", "w", encoding="utf-8") as f:
     f.write(html_out)
 
 kb = os.path.getsize("poster_standalone.html") // 1024
-print(f"\n  Done! poster_standalone.html ({kb} KB)")
-print(f"  Open it in Chrome — drag the file onto a Chrome window.")
+n_edges = sum(len(data[era]["edges"]) for era in ["era1","era2"])
+print(f"  Done! poster_standalone.html ({kb} KB)")
+print(f"  Edges on poster: {n_edges} total (Era I + Era II combined)")
+print(f"  Open in Chrome — drag the file onto a Chrome window.")
 print(f"  Or via server: python3 -m http.server 8080")
 print(f"  then go to:    http://localhost:8080/poster_standalone.html")

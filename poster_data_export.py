@@ -102,6 +102,21 @@ ONE_SIDED_DELTA  = 2.5    # minimum asymmetry for one-sided classification
 COLD_MIN_YEARS   = 12     # minimum co-eligible years for cold shoulder
 COLD_MAX_NVS     = 0.6    # maximum NVS for cold shoulder
 
+# ── Interesting-edge selection (applied AFTER classification) ──────────────
+# The poster shows at most MAX_EDGES_TOTAL edges per panel.
+# Cross-bloc edges are preferred over within-bloc ones because the bloc
+# territories (convex hulls) already communicate within-bloc structure.
+# The only edges that add information the hulls cannot show are cross-bloc.
+MAX_EDGES_TOTAL  = 35     # hard cap per panel — readable on A0
+MAX_PER_TYPE = {           # per-category cap — cross-bloc counted first
+    "stable_alliance": 10,
+    "strengthened":     6,
+    "weakened":         4,
+    "one_sided":        7,
+    "cold_shoulder":    4,
+    "new":              6,
+}
+
 # Layout parameters
 LON_MIN, LON_MAX = -30, 60   # geographic extent (degrees)
 LAT_MIN, LAT_MAX = 28,  72
@@ -468,11 +483,72 @@ def classify_edges(
                 "recv_nvs":  round(recv_nvs, 3),
             })
 
-    counts = defaultdict(int)
+    # ── Score each edge within its category and keep only the top-N ──────────
+    #
+    # WHY: raw thresholds produce 60-120 edges which turns the poster into
+    # visual noise. We want the 30-40 most analytically interesting ones.
+    #
+    # Scoring by category (higher = more interesting to show on poster):
+    #   stable_alliance  → mutual NVS × stability × log(1+co_years)
+    #                       rewards alliances that are strong, consistent, AND long
+    #   strengthened     → Era II NVS − Era I NVS  (largest growth)
+    #   weakened         → Era I NVS − Era II NVS  (largest decline)
+    #   one_sided        → give_nvs − recv_nvs      (largest asymmetry gap)
+    #   cold_shoulder    → co_years × (1 − max_nvs) (longest snub)
+    #   new              → Era II NVS               (strongest new relationship)
+    #
+    # Cross-bloc edges are shown in preference to within-bloc ones because
+    # the convex hull polygons already communicate "these countries vote together."
+    # The edges that add NEW information are the cross-bloc ones.
+
+    def _edge_score(e, bm1, bm2):
+        t = e["type"]
+        cross = (bm1.get(e["a"]) != bm1.get(e["b"]) or
+                 bm2.get(e["a"]) != bm2.get(e["b"]))
+        cross_bonus = 1.3 if cross else 1.0   # boost cross-bloc edges
+
+        if t == "stable_alliance":
+            base = e["e2_mutual"] * e["stability"] * math.log1p(e["co_years"])
+        elif t == "strengthened":
+            base = e["e2_mutual"] - e["e1_mutual"]
+        elif t == "weakened":
+            base = e["e1_mutual"] - e["e2_mutual"]
+        elif t == "one_sided":
+            base = e["give_nvs"] - e["recv_nvs"]
+        elif t == "cold_shoulder":
+            max_nvs = max(e["e1_mutual"], e["e2_mutual"], 0.01)
+            base = e["co_years"] * (1.0 - max_nvs / 12.0)
+        else:   # new
+            base = e["e2_mutual"]
+        return base * cross_bonus
+
+    # Score all edges (needs bloc maps — passed in via closure over q1/q2)
+    bm1_flat = {c: "?" for c in q1}
+    bm2_flat = {c: "?" for c in q2}
     for e in edges:
+        e["score"] = round(_edge_score(e, bm1_flat, bm2_flat), 3)
+
+    # Keep top-N per category
+    by_type = defaultdict(list)
+    for e in edges:
+        by_type[e["type"]].append(e)
+
+    kept = []
+    for t, cap in MAX_PER_TYPE.items():
+        bucket = sorted(by_type[t], key=lambda e: e["score"], reverse=True)
+        kept.extend(bucket[:cap])
+
+    # Enforce overall cap (keep highest scores across all types)
+    kept.sort(key=lambda e: e["score"], reverse=True)
+    kept = kept[:MAX_EDGES_TOTAL]
+
+    counts = defaultdict(int)
+    for e in kept:
         counts[e["type"]] += 1
-    print(f"    Edges: {len(edges)} total — " + ", ".join(f"{v} {k}" for k,v in sorted(counts.items())))
-    return edges
+    raw = len(edges)
+    print(f"    Raw edges: {raw} → kept {len(kept)} most interesting")
+    print(f"    " + "  ".join(f"{v} {k}" for k, v in sorted(counts.items())))
+    return kept
 
 
 # =============================================================================

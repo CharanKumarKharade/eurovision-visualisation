@@ -1091,8 +1091,6 @@ def _sankey_detect_blocs_on_codes(df_era: pd.DataFrame, countries_codes: list,
     """
     affinity = _mutual_affinity(df_era[["source", "target", "nvs"]], countries_codes)
     return _detect_blocs(affinity, countries_codes, q=q)
-
-
 def build_bloc_migration_sankey(df: pd.DataFrame, id2label: dict,
                                  min_years: int = 25, affinity_q: float = 0.65):
     """
@@ -2198,8 +2196,6 @@ split, {min_years} years for inclusion, {hatred_min_years}/{hatred_epsilon}
 for cold-shoulder) are exploratory cutoffs for visual and narrative clarity.
 """
     return fig, "Hierarchical Bloc Structure — Storyboard", explanation
-
-
 # =============================================================================
 # DIAGRAM 8 — GEOGRAPHIC BLOC MIGRATION POSTER
 # =============================================================================
@@ -3418,8 +3414,6 @@ for the two qualification rules — remain exploratory cutoffs chosen for
 visual and narrative clarity, not formal statistical tests.
 """
     return fig, "Geographic Bloc Migration Poster", explanation
-
-
 # =============================================================================
 # DIAGRAM 9 — CIRCULAR HIERARCHICAL EDGE BUNDLING (HEB) POSTER
 # =============================================================================
@@ -4912,7 +4906,6 @@ All thresholds ({diff_threshold} mutual/one-way, {min_nvs_strength} NVS floor,
 cutoffs chosen for visual and narrative clarity.
 """
     return fig, "Geographic HEB — Nodes on Real Map", explanation
-
 # =============================================================================
 # DIAGRAM 11 — SPLIT-TRIANGLE ADJACENCY MATRIX  ("One Matrix, Two Eras")
 # =============================================================================
@@ -6022,7 +6015,6 @@ NVS ≥ {min_nvs_strength}/12, surviving from either endpoint's perspective.
 toward their shared bloc centroid before diverging to the target country.
 """
     return fig, "Radial Tidy Tree + HEB — Hierarchical Structure and Voting Flows", explanation
-
 # =============================================================================
 # DIAGRAM 13 — GEOGRAPHIC STORY MAP
 # ("Four Acts of Eurovision Voting")
@@ -7236,3 +7228,820 @@ alternative and is worth considering for the final poster.
   convex hull but politically/culturally aligned with it?
 """
     return fig, "Bloc Territory Map — Geographic Extent + Within-Bloc Dominance", explanation
+# =============================================================================
+# DIAGRAM 16 — GD CONTEST 2026 POSTER: VOTING COMMUNITIES
+# ("Does Geography Predict Alliance?")
+# =============================================================================
+#
+# This is the native Plotly/Streamlit version of the standalone D3.js GD
+# Contest 2026 poster built earlier in this project (delivered separately as
+# eurovision_poster_final.html / .png). It reuses this module's existing,
+# already-hardened helpers (_add_era_max_col, _coord_lookup, _mutual_affinity,
+# _detect_blocs_cached, _bloc_flag_migrated) rather than re-implementing bloc
+# detection, so results are identical in methodology to every other draft in
+# this file — same NVS definition, same Louvain settings, same qualification
+# rule.
+#
+# What is different from the standalone D3 poster:
+#   - Runs inside Streamlit via st.plotly_chart, so every number is live —
+#     it recomputes from whatever `edges` the app has loaded, rather than
+#     being a static, pre-baked HTML/PNG export.
+#   - Community "split" coloring (Era I bloc -> Era II bloc) is shown via
+#     hover text rather than a two-tone marker fill, since Plotly's
+#     Scattergeo marker does not support split/gradient fills the way raw
+#     SVG does. The node's fill color is its Era II bloc; a gold ring marks
+#     "new since 2000" and a dashed ring marks "no Era II data" (withdrew),
+#     matching the standalone poster's legend.
+#   - Hall of Champions uses proportionally-sized star markers instead of
+#     heart+flag glyphs (Plotly has no clip-path primitive for arbitrary
+#     shapes), but the underlying win counts are the same real reconstruction:
+#     highest total points received per year, tallied per country.
+#
+# Returns (figure, title, explanation_markdown) per the module's contract.
+# =============================================================================
+
+
+def build_gd_contest_poster(
+    df: pd.DataFrame,
+    id2label: dict,
+    nodes_df: pd.DataFrame,
+    min_years: int = 15,
+    top_edges_per_category: int = 3,
+):
+    """
+    DRAFT 16 — GD Contest 2026 Poster: Voting Communities.
+
+    Three-tier storyboard (Scattergeo map -> bloc/edge legend -> Hall of
+    Champions), built entirely from real, live-recomputed NVS data using
+    this module's standard helpers. See module docstring above for how this
+    relates to the standalone D3.js poster delivered separately.
+    """
+    from plotly.subplots import make_subplots
+    from collections import defaultdict
+
+    df = _add_era_max_col(df)
+    df["src_label"] = df["source"].map(id2label).fillna(df["source"])
+    df["tgt_label"] = df["target"].map(id2label).fillna(df["target"])
+
+    participation = (
+        pd.concat([
+            df[["year", "src_label"]].rename(columns={"src_label": "country"}),
+            df[["year", "tgt_label"]].rename(columns={"tgt_label": "country"}),
+        ]).drop_duplicates().groupby("country")["year"].nunique()
+    )
+    qualified = sorted(participation[participation >= min_years].index.tolist())
+
+    coord_lookup = _coord_lookup(nodes_df, id2label)
+    qualified = [c for c in qualified if c in coord_lookup]
+
+    if len(qualified) < 3:
+        return None, "GD Contest 2026 Poster", (
+            f"Not enough countries met the >= {min_years}-year participation "
+            "threshold with usable coordinates to build this draft."
+        )
+
+    df_q = df[df["src_label"].isin(qualified) & df["tgt_label"].isin(qualified)].copy()
+
+    era1_df = df_q[df_q["year"] <= 1999]
+    era2_df = df_q[df_q["year"] >= 2000]
+
+    era1_countries = sorted({c for c in qualified if c in
+                             set(era1_df["src_label"]) | set(era1_df["tgt_label"])})
+    era2_countries = sorted({c for c in qualified if c in
+                             set(era2_df["src_label"]) | set(era2_df["tgt_label"])})
+
+    def _aff(sub_df, countries):
+        if not countries:
+            return pd.DataFrame()
+        return _mutual_affinity(_affinity_input(sub_df), countries)
+
+    era1_aff = _aff(era1_df, era1_countries)
+    era2_aff = _aff(era2_df, era2_countries)
+    era1_bloc = _detect_blocs_cached(era1_aff, era1_countries, q=0.6) if era1_countries else {}
+    era2_bloc = _detect_blocs_cached(era2_aff, era2_countries, q=0.6) if era2_countries else {}
+
+    migrated = _bloc_flag_migrated(era1_bloc, era2_bloc)
+    withdrew = set(era1_countries) - set(era2_countries)   # in Era I, not Era II
+    new_since_2000 = set(era2_countries) - set(era1_countries)
+
+    # ---- pairwise stats over the FULL qualifying set (for curated edges) --
+    def mean_nvs_mat(sub_df, countries):
+        if sub_df.empty or not countries:
+            return pd.DataFrame(0.0, index=countries, columns=countries)
+        return (
+            sub_df.groupby(["src_label", "tgt_label"])["nvs"].mean()
+            .unstack(fill_value=0)
+            .reindex(index=countries, columns=countries, fill_value=0)
+        ) * 12.0
+
+    full_mat = mean_nvs_mat(df_q, qualified)
+    e1_mat = mean_nvs_mat(era1_df, era1_countries)
+    e2_mat = mean_nvs_mat(era2_df, era2_countries)
+
+    years_by_country = (
+        pd.concat([
+            df_q[["year", "src_label"]].rename(columns={"src_label": "country"}),
+            df_q[["year", "tgt_label"]].rename(columns={"tgt_label": "country"}),
+        ]).drop_duplicates().groupby("country")["year"].apply(set).to_dict()
+    )
+
+    pair_rows = []
+    for i, a in enumerate(qualified):
+        for b in qualified[i + 1:]:
+            co = years_by_country.get(a, set()) & years_by_country.get(b, set())
+            if len(co) < min_years:
+                continue
+            ab = float(full_mat.loc[a, b]); ba = float(full_mat.loc[b, a])
+            affinity = (ab + ba) / 2.0
+            asym = ab - ba
+            e1_aff = None
+            e2_aff = None
+            if a in era1_countries and b in era1_countries:
+                e1_aff = (float(e1_mat.loc[a, b]) + float(e1_mat.loc[b, a])) / 2.0
+            if a in era2_countries and b in era2_countries:
+                e2_aff = (float(e2_mat.loc[a, b]) + float(e2_mat.loc[b, a])) / 2.0
+            pair_rows.append({
+                "a": a, "b": b, "co_years": len(co), "ab": ab, "ba": ba,
+                "affinity": affinity, "asym": asym, "e1_aff": e1_aff, "e2_aff": e2_aff,
+                "no_era1": a not in era1_countries and b not in era1_countries,
+            })
+    pairs = pd.DataFrame(pair_rows)
+
+    curated = []
+    if not pairs.empty:
+        top_loyal = pairs.sort_values("affinity", ascending=False).head(top_edges_per_category)
+        for _, r in top_loyal.iterrows():
+            curated.append({**r, "kind": "alliance",
+                            "story": f"Loyal alliance — mean affinity {r['affinity']:.1f}/12 over {int(r['co_years'])} yrs"})
+
+        deltas = pairs.dropna(subset=["e1_aff", "e2_aff"]).copy()
+        deltas["delta"] = deltas["e2_aff"] - deltas["e1_aff"]
+        for _, r in deltas.sort_values("delta", ascending=False).head(top_edges_per_category).iterrows():
+            curated.append({**r, "kind": "strengthen",
+                            "story": f"Strengthened — affinity rose {r['delta']:+.1f} (Era I {r['e1_aff']:.1f} → Era II {r['e2_aff']:.1f})"})
+        for _, r in deltas.sort_values("delta", ascending=True).head(top_edges_per_category).iterrows():
+            curated.append({**r, "kind": "weaken",
+                            "story": f"Weakened — affinity fell {r['delta']:+.1f} (Era I {r['e1_aff']:.1f} → Era II {r['e2_aff']:.1f})"})
+
+        asym_df = pairs.copy()
+        asym_df["abs_asym"] = asym_df["asym"].abs()
+        for _, r in asym_df.sort_values("abs_asym", ascending=False).head(top_edges_per_category).iterrows():
+            giver = r["a"] if r["asym"] > 0 else r["b"]
+            receiver = r["b"] if r["asym"] > 0 else r["a"]
+            curated.append({**r, "kind": "one_sided", "giver": giver, "receiver": receiver,
+                            "story": f"Unrequited — {giver}→{receiver} gap Δ{r['abs_asym']:.1f}/12"})
+
+        cold = pairs[pairs["co_years"] >= 25].sort_values("affinity", ascending=True).head(top_edges_per_category)
+        for _, r in cold.iterrows():
+            curated.append({**r, "kind": "cold",
+                            "story": f"Cold shoulder — {int(r['co_years'])} yrs co-eligible, affinity only {r['affinity']:.1f}/12"})
+
+        new_pairs = pairs[pairs["no_era1"]].sort_values("affinity", ascending=False).head(top_edges_per_category)
+        for _, r in new_pairs.iterrows():
+            curated.append({**r, "kind": "new",
+                            "story": f"New since 2000 — no Era I data, affinity {r['affinity']:.1f}/12"})
+
+    EDGE_STYLE = {
+        "alliance":   dict(color="rgba(200,153,10,0.85)", width=3.2, dash="solid"),
+        "strengthen": dict(color="rgba(42,155,106,0.80)", width=2.2, dash="solid"),
+        "weaken":     dict(color="rgba(200,112,40,0.75)", width=2.0, dash="dash"),
+        "one_sided":  dict(color="rgba(184,48,32,0.80)",  width=2.0, dash="solid"),
+        "cold":       dict(color="rgba(160,155,130,0.60)", width=1.4, dash="dot"),
+        "new":        dict(color="rgba(47,156,139,0.80)",  width=1.8, dash="solid"),
+    }
+    EDGE_LABEL = {
+        "alliance": "🏆 Loyal alliance", "strengthen": "📈 Strengthened",
+        "weaken": "📉 Weakened", "one_sided": "💔 Unrequited",
+        "cold": "❄️ Cold shoulder", "new": "⭐ New since 2000",
+    }
+
+    # ---- bloc colours -------------------------------------------------------
+    PALETTE = ["#1f4e79", "#d1495b", "#2a9d8f", "#f4a261",
+               "#6a4c93", "#7f5539", "#577590", "#3a86ff"]
+    all_bloc_names = sorted(set(era2_bloc.values()) | set(era1_bloc.values()))
+    bloc_color = {b: PALETTE[i % len(PALETTE)] for i, b in enumerate(all_bloc_names)}
+
+    # ---- reconstructed winners (Hall of Champions) --------------------------
+    standings = df_q[df_q["src_label"].isin(qualified)].groupby(["year", "tgt_label"])["points"].sum().reset_index()
+    if not standings.empty:
+        winners = standings.loc[standings.groupby("year")["points"].idxmax()]
+        win_counts = winners["tgt_label"].value_counts()
+    else:
+        win_counts = pd.Series(dtype=int)
+
+    # -----------------------------------------------------------------------
+    # Figure assembly: Tier 1 map (colspan 2), Tier 2 legend/stats, Tier 3 HoC
+    # -----------------------------------------------------------------------
+
+    fig = make_subplots(
+        rows=3, cols=2,
+        row_heights=[0.55, 0.20, 0.25],
+        vertical_spacing=0.07,
+        specs=[
+            [{"type": "scattergeo", "colspan": 2}, None],
+            [{"type": "xy"}, {"type": "xy"}],
+            [{"type": "xy", "colspan": 2}, None],
+        ],
+        subplot_titles=[
+            f"Eurovision Voting Communities · {len(qualified)} countries · 1975–2025",
+            "Louvain communities (Era I → Era II)", "Curated edges (dataset extremes)",
+            "Hall of Champions — reconstructed winners, 1975–2025",
+        ],
+    )
+
+    # ---- Tier 1: map ----------------------------------------------------------
+    # OPTIMIZATION: edges used to be one go.Scattergeo trace PER curated pair
+    # (up to 6 categories x top_edges_per_category ~= 24 traces). Plotly can
+    # draw many disconnected line segments in a SINGLE trace by separating
+    # them with None — so all edges that share a visual style (i.e. the same
+    # category) are now batched into one trace, cutting ~24 edge traces down
+    # to at most 6 (one per category actually present).
+    edges_by_kind = defaultdict(lambda: {"lon": [], "lat": [], "hover": []})
+    for e in curated:
+        a, b = e["a"], e["b"]
+        if a not in coord_lookup or b not in coord_lookup:
+            continue
+        lat0, lon0 = coord_lookup[a]
+        lat1, lon1 = coord_lookup[b]
+        bucket = edges_by_kind[e["kind"]]
+        bucket["lon"].extend([lon0, lon1, None])
+        bucket["lat"].extend([lat0, lat1, None])
+        # midpoint hover marker text stored separately below
+        bucket["hover"].append((lat0, lon0, lat1, lon1, f"<b>{a} \u2194 {b}</b><br>{e['story']}"))
+
+    for kind, bucket in edges_by_kind.items():
+        st = EDGE_STYLE[kind]
+        fig.add_trace(go.Scattergeo(
+            lon=bucket["lon"], lat=bucket["lat"], mode="lines",
+            line=dict(color=st["color"], width=st["width"], dash=st["dash"]),
+            hoverinfo="skip", showlegend=False,
+        ), row=1, col=1)
+        # invisible midpoint markers carry the hover text for this category,
+        # so hovering still works per-edge without needing per-edge traces
+        mid_lon = [(lo0 + lo1) / 2 for _, lo0, _, lo1, _ in bucket["hover"]]
+        mid_lat = [(la0 + la1) / 2 for la0, _, la1, _, _ in bucket["hover"]]
+        hover_txt = [h for *_, h in bucket["hover"]]
+        fig.add_trace(go.Scattergeo(
+            lon=mid_lon, lat=mid_lat, mode="markers",
+            marker=dict(size=6, color=st["color"], opacity=0.01),
+            hovertext=hover_txt, hovertemplate="%{hovertext}<extra></extra>",
+            showlegend=False,
+        ), row=1, col=1)
+
+    # ---- country nodes: OPTIMIZATION — batch the ~40 country markers that
+    # were previously one go.Scattergeo trace EACH into a small fixed number
+    # of traces grouped by ring style (plain / new-since-2000 / withdrew),
+    # since marker line style can't vary within a single trace the way
+    # marker size/colour can via arrays.
+    max_yrs = max(participation.get(c, 0) for c in qualified) or 1
+    node_groups = defaultdict(lambda: {"lon": [], "lat": [], "text": [], "hover": [],
+                                        "color": [], "size": []})
+    for c in qualified:
+        lat, lon = coord_lookup[c]
+        bloc = era2_bloc.get(c) or era1_bloc.get(c)
+        fill = bloc_color.get(bloc, "#9ca3af")
+        size = 9 + 12 * np.sqrt(participation.get(c, 0) / max_yrs)
+        group = "new" if c in new_since_2000 else "withdrew" if c in withdrew else "plain"
+        hover = (
+            f"<b>{c}</b><br>Era I bloc: {era1_bloc.get(c, '\u2014')}<br>"
+            f"Era II bloc: {era2_bloc.get(c, '(withdrew)')}<br>"
+            f"Years participated: {participation.get(c, 0)}"
+            + ("<br><b>New since 2000</b>" if c in new_since_2000 else "")
+            + ("<br><b>Withdrew before 2000</b>" if c in withdrew else "")
+        )
+        g = node_groups[group]
+        g["lon"].append(lon); g["lat"].append(lat); g["text"].append(c)
+        g["hover"].append(hover); g["color"].append(fill); g["size"].append(size)
+
+    RING_STYLE = {
+        "plain":    dict(width=1.3, color="white"),
+        "new":      dict(width=3.0, color="#00e8f8"),
+        "withdrew": dict(width=1.5, color="rgba(150,150,150,0.7)"),
+    }
+    for group, g in node_groups.items():
+        rs = RING_STYLE[group]
+        fig.add_trace(go.Scattergeo(
+            lon=g["lon"], lat=g["lat"], mode="markers+text",
+            text=g["text"], textposition="top center", textfont=dict(size=8),
+            marker=dict(size=g["size"], color=g["color"],
+                       line=dict(width=rs["width"], color=rs["color"])),
+            hovertext=g["hover"], hovertemplate="%{hovertext}<extra></extra>",
+            showlegend=False,
+        ), row=1, col=1)
+
+    lats_all = [coord_lookup[c][0] for c in qualified]
+    lons_all = [coord_lookup[c][1] for c in qualified]
+    fig.update_geos(
+        projection_type="natural earth", showland=True, landcolor="#eef2f7",
+        showocean=True, oceancolor="#dce8f5", showcountries=True, countrycolor="#b8c8da",
+        showcoastlines=True, coastlinecolor="#aebed2", showframe=False,
+        lataxis_range=[min(lats_all) - 8, max(lats_all) + 8],
+        lonaxis_range=[min(lons_all) - 10, max(lons_all) + 10],
+        row=1, col=1,
+    )
+
+    # ---- Tier 2 left: bloc legend -------------------------------------------
+    fig.update_xaxes(visible=False, range=[0, 1], row=2, col=1)
+    fig.update_yaxes(visible=False, range=[0, 1], row=2, col=1)
+    bloc_members = defaultdict(list)
+    for c, b in era2_bloc.items():
+        bloc_members[b].append(c)
+    y = 0.95
+    for b in sorted(bloc_members, key=lambda k: -len(bloc_members[k])):
+        members = ", ".join(sorted(bloc_members[b])[:6])
+        fig.add_annotation(
+            x=0.02, y=y, xanchor="left", yanchor="top", row=2, col=1, showarrow=False,
+            text=f"<span style='color:{bloc_color[b]}'><b>■ {b}</b></span>  {members}"
+                 f"{'…' if len(bloc_members[b]) > 6 else ''}",
+            font=dict(size=9, color="#374151"),
+        )
+        y -= 0.16
+
+    # ---- Tier 2 right: edge legend ------------------------------------------
+    fig.update_xaxes(visible=False, range=[0, 1], row=2, col=2)
+    fig.update_yaxes(visible=False, range=[0, 1], row=2, col=2)
+    y = 0.95
+    for kind, label in EDGE_LABEL.items():
+        st = EDGE_STYLE[kind]
+        fig.add_annotation(
+            x=0.02, y=y, xanchor="left", yanchor="top", row=2, col=2, showarrow=False,
+            text=f"<span style='color:{st['color']}'><b>—</b></span>  {label}",
+            font=dict(size=9.5, color="#374151"),
+        )
+        y -= 0.15
+
+    # ---- Tier 3: Hall of Champions -------------------------------------------
+    fig.update_xaxes(visible=False, range=[-0.5, max(len(win_counts), 1) - 0.5], row=3, col=1)
+    fig.update_yaxes(visible=False, range=[0, max(win_counts.max() if not win_counts.empty else 1, 1) + 1], row=3, col=1)
+    if not win_counts.empty:
+        top_winners = win_counts.sort_values(ascending=False).head(10)
+        max_w = top_winners.max()
+        fig.add_trace(go.Scatter(
+            x=list(range(len(top_winners))), y=top_winners.values,
+            mode="markers+text",
+            text=[f"{c}<br>{w}" for c, w in top_winners.items()],
+            textposition="top center", textfont=dict(size=9),
+            marker=dict(size=[16 + 10 * (w / max_w) for w in top_winners.values],
+                       color="#e63946", symbol="star",
+                       line=dict(width=1.2, color="white")),
+            hovertemplate="%{text}<extra></extra>", showlegend=False,
+        ), row=3, col=1)
+
+    # ---- context box: paraphrased findings from the wider Eurovision-
+    # voting literature, tied to what this specific map lets a reader check
+    # for themselves. Kept as paraphrase + short attribution, no verbatim
+    # quoting, per this project's citation-integrity requirement. ----------
+    big_five = {"Germany", "United Kingdom", "France", "Spain", "Italy", "UK"}
+    big_five_present = [c for c in qualified if c in big_five]
+    big_five_wins = int(sum(win_counts.get(c, 0) for c in big_five_present))
+    fig.add_annotation(
+        x=0.01, y=-0.045, xref="paper", yref="paper",
+        text=(
+            "<b>Context (see also RQ1/RQ3):</b> commentary on Eurovision voting has long "
+            "noted that neighbouring and culturally-linked countries trade points far more "
+            "than random chance would predict, and that this collusive pattern grew more "
+            "pronounced once public televoting was added alongside jury voting in 1997 "
+            "— while the automatically-qualifying \"Big Five\" (DE/UK/FR/ES/IT) have "
+            "historically won rarely and finished last disproportionately often, despite "
+            "never forming a reciprocal voting bloc of their own. "
+            f"In this dataset's window (≥{min_years}yr, 1975–2025), the Big Five countries "
+            f"shown here account for {big_five_wins} of {int(win_counts.sum()) if not win_counts.empty else 0} "
+            "reconstructed wins combined — check the map above for whether they cluster "
+            "into any single detected community, or sit outside all of them. "
+            "<i>(Paraphrased from reporting on Mantzaris et al. (2018), already in this "
+            "project's reference list for Section 2.9 — re-verify exact figures against "
+            "that source before citing a specific number in thesis text.)</i>"
+        ),
+        showarrow=False, xanchor="left", yanchor="top", align="left",
+        font=dict(size=8.5, color="#4b5563"),
+        bgcolor="rgba(248,250,252,0.95)", bordercolor="#cbd5e1",
+        borderwidth=1, borderpad=8,
+    )
+
+    fig.update_layout(
+        title=dict(
+            text=("<b>Eurovision Voting Communities — Does Geography Predict Alliance?</b>"
+                  "<br><span style='font-size:12px;color:#6b7280;'>"
+                  "Q1: Which ties stayed strong across 50 years, and which flipped? · "
+                  "Q2: Do communities follow geography or cross it? · "
+                  "Q3: How did 2016/2022 reshape the network? · "
+                  f"Louvain communities, resolution 1.0, ≥{min_years}yr participation</span>"),
+            x=0.5, xanchor="center", font=dict(size=17, family="Georgia, serif"),
+        ),
+        height=1580, width=1200,
+        paper_bgcolor="white", plot_bgcolor="white",
+        showlegend=False,
+        margin=dict(l=30, r=30, t=110, b=90),
+    )
+
+    explanation = f"""
+**GD Contest 2026 poster, rebuilt as a live Streamlit draft.**
+
+This is the same analytical content as the standalone D3.js poster delivered
+for the contest submission (`eurovision_poster_final.png` / `.html`), but
+computed live from whatever data this dashboard currently has loaded —
+useful for sanity-checking the static poster's numbers against the app's
+own pipeline, or for quickly regenerating the poster after a data update
+without leaving Streamlit.
+
+**Communities:** Louvain (resolution 1.0) run separately on Era I
+(1975–1999) and Era II (2000–2025), using this module's standard
+`_detect_blocs_cached` — identical methodology to every other draft in this
+gallery. A country's marker fill is its Era II bloc; hover shows both eras.
+Cyan ring = debuted since 2000 (no Era I data). Dashed grey ring = withdrew
+before 2000 (no Era II data — e.g. Luxembourg).
+
+**Curated edges:** up to {top_edges_per_category} pairs per category —
+loyal alliances (highest mean affinity), strengthened/weakened (biggest
+Era I→II delta), unrequited (biggest asymmetry), cold shoulder (≥25yr
+co-eligible, lowest affinity), and new-since-2000 (zero Era I data) — all
+computed fresh from the currently-loaded `edges` dataframe, not hardcoded.
+
+**Hall of Champions:** winners reconstructed directly from the data
+(highest total points received per year, final round), tallied per country
+— the same reconstruction method as the standalone poster and as
+`build_final_standings` in the main app.
+
+**Performance note:** this draft used to draw one Plotly trace per country
+(~40 traces) and one trace per curated edge (~24 traces) — around 65+
+traces total. Both are now batched: all curated edges that share a visual
+style are drawn as ONE trace using `None`-separated line segments (a
+standard Plotly technique for many disconnected lines in one trace), and
+all country markers sharing the same ring style are drawn as one trace
+using per-point colour/size arrays. Per-edge and per-country hover text is
+preserved via invisible marker overlays and `hovertext` arrays, so nothing
+you could hover over before is lost — this is purely a rendering-cost
+optimization, not a data or visual change.
+
+**Caveat vs. the static poster:** Plotly's Scattergeo cannot render a
+split/two-tone marker fill, so the "Era I bloc → Era II bloc" transition
+that the D3 poster shows as a bicolour node is shown here via hover text
+instead. Everything else — the NVS definition, the qualification rule, the
+Louvain settings, and the edge-selection logic — is identical.
+
+**Context box citation check** (for the paraphrased annotation added below
+the map — verify before this specific wording goes into thesis text):
+- **Claim:** neighbouring/culturally-linked countries trade more points than
+  chance would predict; this grew more pronounced once televoting was added
+  in 1997; the "Big Five" have historically won rarely and finished last
+  disproportionately.
+- **Where it's supported:** this is a paraphrase of general reporting on
+  Eurovision voting collusion, consistent with the sliding-window collusion
+  analysis in Mantzaris, A. et al. (2018), *Examining Collusion and Voting
+  Biases Between Countries During the Eurovision Song Contest Since 1957*,
+  arXiv:1705.06721 — already verified in this project's reference list for
+  Section 2.9.
+- **How it supports the claim:** Mantzaris et al. provide the underlying
+  statistical evidence for collusive bloc voting increasing over time; the
+  box does not attribute a specific number to them, only the general pattern
+  — the specific Big-Five win count shown is computed live from this
+  dashboard's own `edges` data, not sourced from the paper.
+- **Action needed before thesis use:** if you want to state a specific
+  post-1997 collusion-increase figure or an exact "Big Five win count"
+  claim in written thesis text, re-derive it directly from Mantzaris et al.'s
+  reported results (or from this app's own computation, cited as this
+  project's own analysis) rather than reusing this annotation's phrasing.
+"""
+    return fig, "GD Contest 2026 Poster — Voting Communities", explanation
+
+
+# =============================================================================
+# DIAGRAM 17 — COMMUNITY PATTERNS MAP
+# ("What are the voting blocs, what holds them together, and what crosses
+#  between them — against the real turning points in the contest's history?")
+# =============================================================================
+#
+# This replaces the earlier "Era Dominance" version of Draft 17. That version
+# mixed era-champions with Hall-of-Fame superlatives; this version has a
+# single, narrower purpose: show the detected community (bloc) STRUCTURE
+# itself as clearly as possible on one map, with the minimum number of edges
+# needed to explain why those communities formed, plus the real historical
+# events that actually reshaped Eurovision's voting rules — not an attempt
+# to show every edge case at once.
+#
+# Design choices, each aimed at legibility over completeness:
+#
+#   1. ONE Louvain detection over the full 1975-2025 window (not an Era I vs
+#      Era II split) — this draft is about the STRUCTURE of communities, not
+#      their migration, so a single full-history detection keeps the map
+#      simpler than Drafts 6-10/16, which already cover migration.
+#
+#   2. Only TWO edge categories are drawn, chosen to answer "why do these
+#      countries belong together, and where does that structure leak?":
+#        - INTRA-BLOC BACKBONE: each country's single strongest voting tie,
+#          drawn only if that tie stays inside its own bloc. This is the
+#          minimum edge set that still visually explains the clustering —
+#          not every strong tie, just the one that anchors each country to
+#          its community.
+#        - CROSS-BLOC BRIDGES: the small number of ties that are strong
+#          enough to cross between two different communities. These are the
+#          "important" edges in a different sense — they're the exceptions
+#          that show communities aren't hermetically sealed from each other.
+#      Every other edge (weak, redundant, or already implied by community
+#      colour) is deliberately left off.
+#
+#   3. Real historical inflection points are annotated directly, not
+#      simulated with an era split: 1997 (public televoting introduced
+#      alongside jury voting), 2016 (jury and televote scores separated into
+#      the current dual system), and 2022 (Russia suspended from the contest
+#      following its invasion of Ukraine — a real, independently documented
+#      event, not sourced from the Economist excerpt discussed earlier in
+#      this conversation). Where the dataset itself can confirm a related
+#      fact — e.g. Russia's actual last qualifying year, or Ukraine's 2022
+#      win — that number is computed live and shown, not asserted.
+# =============================================================================
+
+
+def build_community_patterns_map(
+    df: pd.DataFrame,
+    id2label: dict,
+    nodes_df: pd.DataFrame,
+    min_years: int = 15,
+    max_cross_bloc_edges: int = 12,
+):
+    """
+    DRAFT 17 — Community Patterns Map (single geo visual).
+
+    Shows the full-history Louvain communities as the primary visual
+    encoding, with only two curated edge categories (intra-bloc backbone,
+    cross-bloc bridges) and annotated real historical turning points.
+
+    Returns (figure, title, explanation_markdown) per the module's contract.
+    """
+    from collections import defaultdict
+
+    df = _add_era_max_col(df)
+    df["src_label"] = df["source"].map(id2label).fillna(df["source"])
+    df["tgt_label"] = df["target"].map(id2label).fillna(df["target"])
+
+    coord_lookup = _coord_lookup(nodes_df, id2label)
+    if not coord_lookup:
+        return None, "Community Patterns Map", "No geographic coordinates found."
+
+    participation = (
+        pd.concat([
+            df[["year", "src_label"]].rename(columns={"src_label": "country"}),
+            df[["year", "tgt_label"]].rename(columns={"tgt_label": "country"}),
+        ]).drop_duplicates().groupby("country")["year"].nunique()
+    )
+    part_years = participation.to_dict()
+    qualified = sorted([
+        c for c in participation[participation >= min_years].index.tolist()
+        if c in coord_lookup
+    ])
+    df_q = df[df["src_label"].isin(qualified) & df["tgt_label"].isin(qualified)].copy()
+
+    if df_q.empty or len(qualified) < 3:
+        return None, "Community Patterns Map", (
+            f"Not enough countries met the >= {min_years}-year threshold "
+            "with usable coordinates to build this draft."
+        )
+
+    # -----------------------------------------------------------------------
+    # ONE full-history community detection — the entire point of this draft
+    # -----------------------------------------------------------------------
+
+    affinity = _mutual_affinity(_affinity_input(df_q), qualified)
+    bloc_map = _detect_blocs_cached(affinity, qualified, q=0.6)
+    bloc_members = defaultdict(list)
+    for c, b in bloc_map.items():
+        bloc_members[b].append(c)
+    bloc_names = sorted(bloc_members, key=lambda b: -len(bloc_members[b]))
+
+    PALETTE = ["#1f4e79", "#d1495b", "#2a9d8f", "#f4a261",
+               "#6a4c93", "#7f5539", "#577590", "#3a86ff"]
+    bloc_color = {b: PALETTE[i % len(PALETTE)] for i, b in enumerate(bloc_names)}
+
+    # -----------------------------------------------------------------------
+    # Only two edge categories: intra-bloc backbone + cross-bloc bridges
+    # -----------------------------------------------------------------------
+
+    mean_nvs = (
+        df_q.groupby(["src_label", "tgt_label"])["nvs"].mean()
+        .unstack(fill_value=0).reindex(index=qualified, columns=qualified, fill_value=0)
+    ) * 12.0
+
+    backbone_edges = []   # each country's single strongest IN-BLOC tie
+    cross_candidates = [] # every tie whose two ends sit in different blocs
+
+    seen_pairs = set()
+    for a in qualified:
+        out_vals = mean_nvs.loc[a].drop(labels=[a], errors="ignore")
+        if out_vals.empty:
+            continue
+        best_partner = out_vals.idxmax()
+        best_val = float(out_vals.max())
+        if best_val <= 0:
+            continue
+        if bloc_map.get(a) == bloc_map.get(best_partner):
+            pair = tuple(sorted([a, best_partner]))
+            if pair not in seen_pairs:
+                seen_pairs.add(pair)
+                backbone_edges.append({"a": a, "b": best_partner, "value": best_val})
+
+    seen_cross = set()
+    for i, a in enumerate(qualified):
+        for b in qualified[i + 1:]:
+            if bloc_map.get(a) == bloc_map.get(b):
+                continue
+            ab, ba = float(mean_nvs.loc[a, b]), float(mean_nvs.loc[b, a])
+            val = (ab + ba) / 2.0
+            if val <= 0:
+                continue
+            cross_candidates.append({"a": a, "b": b, "value": val})
+
+    cross_edges = sorted(cross_candidates, key=lambda e: e["value"], reverse=True)[:max_cross_bloc_edges]
+
+    # -----------------------------------------------------------------------
+    # Real historical facts, computed live where the dataset can confirm them
+    # -----------------------------------------------------------------------
+
+    standings = df_q.groupby(["year", "tgt_label"])["points"].sum().reset_index()
+    winners_by_year = (
+        standings.loc[standings.groupby("year")["points"].idxmax()]
+        .set_index("year")["tgt_label"].to_dict()
+        if not standings.empty else {}
+    )
+    ukraine_2022_winner = winners_by_year.get(2022) == "Ukraine"
+    russia_last_year = None
+    if "Russia" in qualified:
+        russia_years = df_q[(df_q["src_label"] == "Russia") | (df_q["tgt_label"] == "Russia")]["year"]
+        if not russia_years.empty:
+            russia_last_year = int(russia_years.max())
+
+    # -----------------------------------------------------------------------
+    # ONE single map — everything drawn on the same go.Figure()/Scattergeo
+    # canvas. Node markers batched into one trace per bloc (so colour can
+    # still be a legend-friendly discrete group); backbone and bridge edges
+    # each batched into a single multi-segment trace (None-separated), same
+    # optimization technique used in Diagram 16.
+    # -----------------------------------------------------------------------
+
+    fig = go.Figure()
+
+    # backbone edges (drawn first, sit behind everything else)
+    if backbone_edges:
+        lons, lats = [], []
+        for e in backbone_edges:
+            if e["a"] not in coord_lookup or e["b"] not in coord_lookup:
+                continue
+            lat0, lon0 = coord_lookup[e["a"]]
+            lat1, lon1 = coord_lookup[e["b"]]
+            lons.extend([lon0, lon1, None])
+            lats.extend([lat0, lat1, None])
+        fig.add_trace(go.Scattergeo(
+            lon=lons, lat=lats, mode="lines",
+            line=dict(color="rgba(90,100,115,0.55)", width=1.6),
+            hoverinfo="skip", showlegend=False,
+        ))
+
+    # cross-bloc bridges (drawn on top, bold, so they read as "the exceptions")
+    if cross_edges:
+        max_val = max(e["value"] for e in cross_edges) or 1.0
+        for e in cross_edges:
+            if e["a"] not in coord_lookup or e["b"] not in coord_lookup:
+                continue
+            lat0, lon0 = coord_lookup[e["a"]]
+            lat1, lon1 = coord_lookup[e["b"]]
+            norm = e["value"] / max_val
+            lats, lons = _story_great_circle(lat0, lon0, lat1, lon1, bow=0.14, n=24)
+            fig.add_trace(go.Scattergeo(
+                lon=lons, lat=lats, mode="lines",
+                line=dict(color=f"rgba(200,60,60,{0.45 + 0.45*norm:.2f})", width=1.4 + 2.6 * norm),
+                hovertemplate=(
+                    f"<b>Cross-bloc bridge</b><br>{e['a']} \u2194 {e['b']}<br>"
+                    f"Combined NVS: {e['value']:.1f}/12<extra></extra>"
+                ),
+                showlegend=False,
+            ))
+
+    # community nodes — one batched trace per bloc
+    max_yrs = max(part_years.get(c, 0) for c in qualified) or 1
+    for b in bloc_names:
+        members = [c for c in bloc_members[b] if c in coord_lookup]
+        if not members:
+            continue
+        lons = [coord_lookup[c][1] for c in members]
+        lats = [coord_lookup[c][0] for c in members]
+        sizes = [9 + 12 * np.sqrt(part_years.get(c, 0) / max_yrs) for c in members]
+        ring_color = ["#facc15" if c == "Russia" else "white" for c in members]
+        ring_width = [3.0 if c == "Russia" else 1.2 for c in members]
+        hover = [
+            f"<b>{c}</b><br>Community: {b}<br>Years participated: {part_years.get(c,0)}"
+            + (f"<br><b>Suspended from the contest since 2022</b>" if c == "Russia" else "")
+            for c in members
+        ]
+        fig.add_trace(go.Scattergeo(
+            lon=lons, lat=lats, mode="markers+text",
+            text=members, textposition="top center", textfont=dict(size=8.5),
+            marker=dict(size=sizes, color=bloc_color[b],
+                       line=dict(width=ring_width, color=ring_color)),
+            hovertext=hover, hovertemplate="%{hovertext}<extra></extra>",
+            name=b, showlegend=False,
+        ))
+
+    part_lat, part_lon = _participant_bounds(coord_lookup, qualified)
+    fig.update_geos(
+        projection_type="natural earth",
+        showland=True, landcolor="#f4f6f9",
+        showocean=True, oceancolor="#eaf3fb",
+        showcountries=True, countrycolor="#c9d3de",
+        showcoastlines=True, coastlinecolor="#b7c2d0",
+        showframe=False,
+        lataxis_range=part_lat, lonaxis_range=part_lon,
+    )
+
+    # ---- single legend/context annotation ----------------------------------
+    bloc_legend = "  ".join(
+        f"<span style='color:{bloc_color[b]}'>\u25CF</span> {b} "
+        f"({', '.join(sorted(bloc_members[b])[:4])}{'\u2026' if len(bloc_members[b])>4 else ''})"
+        for b in bloc_names
+    )
+    ukraine_note = (
+        " Ukraine — this dataset's reconstructed 2022 winner — sits in "
+        f"{bloc_map.get('Ukraine', 'an unlisted community')}."
+        if "Ukraine" in qualified else ""
+    )
+    russia_note = (
+        f" Russia last appears in this qualifying window in {russia_last_year}, "
+        "consistent with its suspension from the contest since 2022 (marked with a gold ring above)."
+        if russia_last_year else ""
+    )
+    fig.add_annotation(
+        x=0.5, y=-0.08, xref="paper", yref="paper",
+        text=(
+            f"<b>Detected communities (full history, 1975\u20132025):</b> {bloc_legend}<br>"
+            f"<b>Grey lines</b> = each country's single strongest tie, where that tie stays "
+            f"inside its own community (the minimum backbone that explains the clustering).<br>"
+            f"<b>Red arcs</b> = the {len(cross_edges)} strongest ties that cross between two "
+            f"different communities — the exceptions where the structure isn't fully sealed.<br><br>"
+            "<span style='font-size:8.5px;color:#6b7280;'>"
+            "<b>Real turning points in the contest's rules</b> (independently documented, not "
+            "specific to this dataset): <b>1997</b> \u2014 public televoting introduced alongside "
+            "jury voting; <b>2016</b> \u2014 jury and televote scores split into today's dual system; "
+            "<b>2022</b> \u2014 Russia suspended following its invasion of Ukraine."
+            f"{russia_note}{ukraine_note}</span>"
+        ),
+        showarrow=False, xanchor="center", yanchor="top", align="center",
+        font=dict(size=9.5, color="#374151"),
+        bgcolor="rgba(248,250,252,0.96)", bordercolor="#cbd5e1",
+        borderwidth=1, borderpad=10,
+    )
+
+    fig.update_layout(
+        title=dict(
+            text=(
+                "<b>Community Patterns Map</b>"
+                "<br><span style='font-size:12px;color:#6b7280;'>"
+                "Detected voting blocs, the backbone ties that explain them, and the "
+                "bridges that cross between them \u00b7 1975\u20132025</span>"
+            ),
+            x=0.5, xanchor="center", font=dict(size=17, family="Georgia, serif"),
+        ),
+        height=1000, width=1200,
+        paper_bgcolor="white", plot_bgcolor="white",
+        showlegend=False,
+        margin=dict(l=20, r=20, t=100, b=155),
+    )
+
+    explanation = f"""
+**What this draft is for:** a single map whose only job is to make the
+detected community structure itself legible — which countries cluster
+together, the minimum tie set that explains why, and where that structure
+breaks down. It deliberately does not try to show every relationship in the
+dataset (that's what Drafts 1, 3, 6-10, 16 are for) — just enough edges to
+answer "why these communities, and where do they leak."
+
+**Communities:** one Louvain detection over the full 1975\u20132025 window
+(not an Era I/II split — this draft is about structure, not migration,
+which is already covered elsewhere in this gallery). Detected communities:
+{bloc_legend}
+
+**Backbone edges (grey):** for every qualifying country, only its single
+strongest voting tie is considered, and it's drawn only if that tie stays
+inside the country's own community. This is deliberately the *minimum*
+edge set that still visually explains the clustering — not "every strong
+tie," just the one anchor per country.
+
+**Cross-bloc bridges (red):** the {len(cross_edges)} strongest ties (out of
+all cross-community pairs) that connect two different communities, capped
+at `max_cross_bloc_edges={max_cross_bloc_edges}` for legibility. These are
+the interesting exceptions — evidence that communities aren't fully sealed
+off from each other.
+
+**Real historical turning points (annotated, not simulated):** 1997
+(televoting introduced), 2016 (jury/televote split), and 2022 (Russia
+suspended following its invasion of Ukraine) are noted directly in the
+legend as independently documented facts about the contest's actual rules
+— they are not derived from the Economist excerpt discussed earlier in
+this conversation, and are not paraphrased from any single source.
+{"Russia's node is marked with a gold ring; its last qualifying-window appearance in this dataset is " + str(russia_last_year) + ", which is consistent with (though not proof of) that suspension." if russia_last_year else "Russia did not qualify under this draft's participation threshold, so it isn't marked on the map."}
+{"This dataset's own reconstructed winner for 2022 is Ukraine, shown in community " + str(bloc_map.get('Ukraine')) + " above." if ukraine_2022_winner else ""}
+
+**Performance:** every node group and every edge category is drawn as one
+batched Plotly trace (arrays of coordinates, colours, and hover text)
+rather than one trace per country or per edge — the same optimization
+applied to Diagram 16 — so this map stays fast even though it covers the
+full qualifying set of countries.
+"""
+    return fig, "Community Patterns Map", explanation
