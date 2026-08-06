@@ -937,7 +937,6 @@ def _render_draft_header(title: str, explanation_md: str):
     st.title(f"📊 Draft: {title}")
     st.caption(
         f"Data scope: Eurovision {ROOT_START}–{ROOT_END} only. "
-        "Standalone draft for the Graph Drawing Contest 2026 poster."
     )
     st.markdown(explanation_md)
     if st.button("⬅ Back to main app", key=f"back_btn_{title}"):
