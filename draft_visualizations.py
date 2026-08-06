@@ -4337,11 +4337,7 @@ panels). **Gold ring** = country's detected bloc changed between eras
 (measured by <50% blocmate overlap — not a label change from Louvain
 renumbering).
 
-**Thesis placement:** cite Holten (2006) in Section 4.3 (Layout Strategy)
-and Section 4.4 (Visual Encoding). The algorithm is directly applicable to
-the Eurovision hierarchy and reduces visual clutter without removing any
-nodes, consistent with the poster's requirement to show all qualifying
-countries.
+
 
 All thresholds ({min_nvs_strength} NVS floor, {diff_threshold} mutual/one-way
 split, {min_years} years for inclusion, {hatred_min_years}/{hatred_epsilon}
@@ -5501,12 +5497,7 @@ reveals cross-bloc relationships that opened up or closed after 2000.
 **Countries shown:** {n} qualifying countries; {n_era1} active in Era I,
 {n_era2} active in Era II.
 
-**Thesis placement:** this is an alternative to the node-link diagrams for
-Section 4.3 (Layout Strategy) — cite Ghoniem et al. (2004) [already in your
-bibliography] for the matrix vs. node-link readability argument: matrix
-representations scale more gracefully when N is large (here ~{n} countries)
-and the reader's primary task is finding dense sub-groups rather than tracing
-individual paths.
+
 """
     return fig, "Split-Triangle Matrix — One Matrix, Two Eras", explanation
 
