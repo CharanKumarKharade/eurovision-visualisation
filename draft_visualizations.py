@@ -2186,7 +2186,7 @@ def build_hierarchical_bloc_poster(
             _panel_title("Full picture · 1975–2025", qualified, full_edges),
             _panel_title("Era 1 · 1975–1999", era1_countries, era1_edges),
             _panel_title("Era 2 · 2000–2025", era2_countries, era2_edges),
-            "Era 1 insights", "Era 2 insights",
+            "", "",
         ],
     )
 
@@ -2278,7 +2278,6 @@ def build_hierarchical_bloc_poster(
     fig.update_layout(
         title=dict(
             text=(
-                "<b>Eurovision Voting Network — Hierarchical Bloc Structure</b>"
                 "<br><span style='font-size:13px;color:#6b7280;'>"
                 "From full history to era split to concrete evidence · 1975–2025</span>"
             ),
@@ -3314,7 +3313,7 @@ def build_geo_bloc_migration_poster(
             f"({n_mutual} mutual, {n_oneway} one-way)</span>"
         )
 
-    title_tier1 = panel_title("Full picture · 1975–2025", tier1_countries, full_edges)
+    title_tier1 = panel_title("", tier1_countries, full_edges)
     title_era1 = panel_title("Era 1 · 1975–1999", era1_countries, era1_edges)
     title_era2 = panel_title("Era 2 · 2000–2025", era2_countries, era2_edges)
 
