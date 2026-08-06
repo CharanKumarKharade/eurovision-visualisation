@@ -1,7 +1,7 @@
 """
 draft_visualizations.py
 
-Seven novel, thesis-grade Eurovision visualisations — distinct from the
+Seven novel, Eurovision visualisations — distinct from the
 existing Sankey (bloc migration), Sunburst (bloc/country/supporter), and
 GeoMap (top-3 voters) views already in the main app.
 
@@ -6123,13 +6123,6 @@ diagram or Sankey answers the second question only. A plain tidy tree answers
 the first only. This diagram answers both simultaneously, which is what makes
 it analytically richer than either technique alone.
 
-**Citations for thesis Section 4.3:**
-- Reingold, E.M. & Tilford, J.S. (1981). Tidier Drawings of Trees.
-  *IEEE Transactions on Software Engineering*, 7(2), 223–228.
-- Buchheim, C., Jünger, M. & Leipert, S. (2002). Improving Walker's
-  algorithm to run in linear time. *Graph Drawing 2002*, LNCS 2528, 344–353.
-- Holten, D.H.R. (2006). Hierarchical Edge Bundles.
-  *IEEE TVCG*, 12(5), 741–748. DOI: 10.1109/TVCG.2006.147
 
 **Edge selection:** top {top_k_out} outgoing NVS ties per country where
 NVS ≥ {min_nvs_strength}/12, surviving from either endpoint's perspective.
@@ -6850,11 +6843,7 @@ Each category has a visual encoding matched to what it represents geometrically:
 6. Act V (Streaks) added as a fifth analytical angle
 7. Alliance scoring and champion star size now data-driven (not fixed)
 
-**Why geography matters here (thesis Section 4.3):**
-The geographic layout IS the analytical contribution — no layout algorithm
-needed. Convergent arc clusters that follow geographic corridors (e.g., Nordic
-highway, Balkan triangle, Caucasus cluster) are the finding; the visualization
-simply makes them visible.
+
 """
     return fig, "Geographic Story Map — Five Acts of Eurovision Voting", explanation
 
@@ -7731,9 +7720,6 @@ def build_gd_contest_poster(
             f"shown here account for {big_five_wins} of {int(win_counts.sum()) if not win_counts.empty else 0} "
             "reconstructed wins combined — check the map above for whether they cluster "
             "into any single detected community, or sit outside all of them. "
-            "<i>(Paraphrased from reporting on Mantzaris et al. (2018), already in this "
-            "project's reference list for Section 2.9 — re-verify exact figures against "
-            "that source before citing a specific number in thesis text.)</i>"
         ),
         showarrow=False, xanchor="left", yanchor="top", align="left",
         font=dict(size=8.5, color="#4b5563"),
@@ -7802,12 +7788,6 @@ that the D3 poster shows as a bicolour node is shown here via hover text
 instead. Everything else — the NVS definition, the qualification rule, the
 Louvain settings, and the edge-selection logic — is identical.
 
-**Context box citation check** (for the paraphrased annotation added below
-the map — verify before this specific wording goes into thesis text):
-- **Claim:** neighbouring/culturally-linked countries trade more points than
-  chance would predict; this grew more pronounced once televoting was added
-  in 1997; the "Big Five" have historically won rarely and finished last
-  disproportionately.
 - **Where it's supported:** this is a paraphrase of general reporting on
   Eurovision voting collusion, consistent with the sliding-window collusion
   analysis in Mantzaris, A. et al. (2018), *Examining Collusion and Voting
@@ -7819,11 +7799,7 @@ the map — verify before this specific wording goes into thesis text):
   box does not attribute a specific number to them, only the general pattern
   — the specific Big-Five win count shown is computed live from this
   dashboard's own `edges` data, not sourced from the paper.
-- **Action needed before thesis use:** if you want to state a specific
-  post-1997 collusion-increase figure or an exact "Big Five win count"
-  claim in written thesis text, re-derive it directly from Mantzaris et al.'s
-  reported results (or from this app's own computation, cited as this
-  project's own analysis) rather than reusing this annotation's phrasing.
+
 """
     return fig, "GD Contest 2026 Poster — Voting Communities", explanation
 
