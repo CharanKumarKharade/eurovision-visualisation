@@ -387,6 +387,139 @@ gives noticeably more than it gets back. 🔵 blue = the reverse. Arc
 
 
 # =============================================================================
+# DIAGRAM 1b — JURY VS PUBLIC DIVERGENCE
+# =============================================================================
+# Answers one of the GD Contest 2026's own suggested inspiration questions:
+# "Are there instances where the public vote is consistently different from
+# the jury vote?" Needs `raw_edges` (unfiltered by score_type) since the main
+# app's `edges` dataframe is pre-filtered to score_type == "total", which
+# discards the jury/public split entirely. Only exists for 2016-2025, when
+# the contest started publishing jury and televote scores separately.
+
+def build_jury_public_divergence(df: pd.DataFrame, id2label: dict, nodes_df: pd.DataFrame,
+                                  min_years: int = 3, top_n: int = 8):
+    """
+    Arc diagram of the country PAIRS whose jury vote and public (televote)
+    vote disagree the most, 2016-2025 only (the only years both exist
+    separately in the data).
+
+    For each pair (A, B), giving direction A->B:
+        NVS_jury(A->B)   = mean(jury points A gave B) / 12
+        NVS_public(A->B) = mean(public points A gave B) / 12
+        divergence(A->B) = NVS_public(A->B) - NVS_public(A->B)... (see below)
+
+    Concretely: divergence(A->B) = NVS_jury(A->B) - NVS_public(A->B).
+    Positive = A's jury liked B more than A's public did.
+    Negative = A's public liked B more than A's jury did.
+
+    Only the top `top_n` pairs by |divergence| are drawn (both directions
+    combined), among pairs with >= min_years of co-participation in the
+    2016-2025 jury+televote era.
+    """
+    d = df.copy()
+    d.columns = [c.strip().lower() for c in d.columns]
+    for col in ["source", "target", "score_type", "round"]:
+        if col in d.columns:
+            d[col] = d[col].astype(str).str.strip().str.lower()
+    d = d[(d["round"] == "final") & (d["year"] >= 2016) & (d["year"] <= 2025)]
+    d = d[d["score_type"].isin(["jury", "public"])]
+    if "points" not in d.columns and "weight" in d.columns:
+        d = d.rename(columns={"weight": "points"})
+    d["points"] = pd.to_numeric(d["points"], errors="coerce").fillna(0)
+    d["nvs"] = (d["points"] / 12.0).clip(0, 1)
+    d["src_label"] = d["source"].map(id2label).fillna(d["source"])
+    d["tgt_label"] = d["target"].map(id2label).fillna(d["target"])
+
+    participation = (
+        pd.concat([
+            d[["year", "src_label"]].rename(columns={"src_label": "country"}),
+            d[["year", "tgt_label"]].rename(columns={"tgt_label": "country"}),
+        ]).drop_duplicates().groupby("country")["year"].nunique()
+    )
+    qualified = participation[participation >= min_years].index.tolist()
+    d = d[d["src_label"].isin(qualified) & d["tgt_label"].isin(qualified)]
+
+    mean_by_type = (
+        d.groupby(["src_label", "tgt_label", "score_type"])["nvs"].mean().unstack("score_type")
+    )
+    mean_by_type = mean_by_type.dropna(subset=["jury", "public"], how="any").reset_index()
+    mean_by_type["divergence"] = mean_by_type["jury"] - mean_by_type["public"]
+    mean_by_type["abs_div"] = mean_by_type["divergence"].abs()
+    top = mean_by_type.sort_values("abs_div", ascending=False).head(top_n).reset_index(drop=True)
+
+    n = len(top)
+    fig = go.Figure()
+    if n == 0:
+        fig.update_layout(
+            annotations=[dict(text="No qualifying pairs found for this filter.",
+                               showarrow=False, x=0.5, y=0.5)],
+            height=600, width=750, paper_bgcolor="white", plot_bgcolor="white",
+        )
+        explanation = "**No data:** no country pairs met the minimum co-participation threshold."
+        return fig, "Jury vs Public — Divergence Network", explanation
+
+    angles = np.linspace(0, 2 * np.pi, n, endpoint=False)
+    label_r, dot_r = 1.15, 1.0
+    xs = dot_r * np.cos(angles)
+    ys = dot_r * np.sin(angles)
+
+    for i, row in top.iterrows():
+        x0, y0 = xs[i], ys[i]
+        color = "#E63946" if row["divergence"] > 0 else "#2E86FF"
+        width = 2 + 10 * (row["abs_div"] / top["abs_div"].max())
+        fig.add_trace(go.Scatter(
+            x=[x0, 0, x0], y=[y0, 0, y0], mode="lines",
+            line=dict(color=color, width=width), opacity=0.55,
+            hoverinfo="text",
+            text=(
+                f"{row['src_label']} \u2192 {row['tgt_label']}<br>"
+                f"Jury NVS: {row['jury']:.3f}<br>"
+                f"Public NVS: {row['public']:.3f}<br>"
+                f"Divergence: {row['divergence']:+.3f}<extra></extra>"
+            ),
+            showlegend=False,
+        ))
+        fig.add_trace(go.Scatter(
+            x=[x0], y=[y0], mode="markers+text",
+            marker=dict(size=10, color=color),
+            text=[f"{row['src_label']}\u2192{row['tgt_label']}"],
+            textposition="middle center" if False else "top center",
+            textfont=dict(size=9),
+            hoverinfo="skip", showlegend=False,
+        ))
+
+    fig.update_layout(
+        xaxis=dict(visible=False, range=[-1.5, 1.5]),
+        yaxis=dict(visible=False, range=[-1.5, 1.5], scaleanchor="x"),
+        height=750, width=750,
+        paper_bgcolor="white", plot_bgcolor="white",
+        margin=dict(l=10, r=10, t=10, b=10),
+    )
+
+    explanation = f"""
+**What this shows:** the {n} giving-relationships (2016-2025 only, the years
+Eurovision publishes jury and public votes separately) where a country's
+**jury vote** and its **public/televote vote** disagreed the most about the
+same recipient.
+
+**Method:** for each direction A→B, `NVS_jury(A→B) = mean(jury points) / 12`
+and `NVS_public(A→B) = mean(televote points) / 12`, each averaged only over
+years both A and B qualify (>= {min_years} years of mutual 2016-2025
+participation). `divergence = NVS_jury - NVS_public`. Only the top {top_n}
+pairs by |divergence| are drawn.
+
+**Reading the diagram:** 🔴 red = that country's **jury** favoured the
+recipient more than its **public** did. 🔵 blue = the reverse (public more
+generous than the jury). Line thickness scales with the size of the gap.
+
+**Answers directly:** yes — jury and public opinion do diverge meaningfully
+for specific pairs, even though both eventually get summed into the same
+final total score each country reports.
+"""
+    return fig, "Jury vs Public — Divergence Network", explanation
+
+
+# =============================================================================
 # DIAGRAM 2 — THE NEIGHBOUR EFFECT (distance vs. affinity)
 # =============================================================================
 

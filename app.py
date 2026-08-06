@@ -59,30 +59,236 @@ except Exception as _draftviz_err:
 # PAGE CONFIGURATION
 # =============================================================================
 
-st.set_page_config(page_title="Eurovision Voting Explorer", layout="wide")
-
-st.markdown(
-    """
-    <style>
-        .stApp {
-            background-color: #fcfcfd;
-        }
-        [data-testid="stSidebar"] {
-            background-color: #f8fafc;
-        }
-        h1, h2, h3 {
-            color: #111827;
-        }
-        .stMetric {
-            background-color: #ffffff;
-            border: 1px solid #e5e7eb;
-            border-radius: 12px;
-            padding: 10px;
-        }
-    </style>
-    """,
-    unsafe_allow_html=True
+_page_for_config = st.session_state.get("page", "landing")
+st.set_page_config(
+    page_title="Eurovision Voting Communities" if _page_for_config != "exploratory" else "Eurovision Voting Explorer",
+    layout="centered" if _page_for_config == "landing" else "wide",
 )
+
+
+# =============================================================================
+# LANDING PAGE / ROUTING
+# =============================================================================
+# Entry point when the poster's QR code is scanned. Shows a brief explanation
+# of the project, then lets the visitor choose between the live interactive
+# poster (same design as the GD Contest submission, but freely responsive -
+# not locked to the 1500x1500px/10MB static-image limit that only applies to
+# the contest's own web-image deliverable) and this exploratory dashboard.
+
+if "page" not in st.session_state:
+    st.session_state["page"] = "landing"
+
+
+def _go(page_name):
+    st.session_state["page"] = page_name
+
+
+if st.session_state["page"] == "landing":
+    st.markdown(
+        """
+        <style>
+            @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@700;800;900&family=Inter:wght@400;500;600&display=swap');
+
+            [data-testid="stAppViewContainer"] {
+                background: linear-gradient(135deg, #1a0b2e 0%, #2d1b4e 30%, #1e2a5e 60%, #0f1a3d 100%);
+            }
+            [data-testid="stHeader"] { background: transparent; }
+            .block-container { padding-top: 2rem; }
+            html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
+            @font-face {
+                font-family: "Eurovision";
+                src: url("eurovision_font_by_lyonstype_dfilqsx.ttf") format("truetype");
+            }
+            .euro-title {
+                text-align: center; padding-top: 1rem;
+                font-family: 'Eurovision', sans-serif;
+                font-weight: 900; font-size: 2.6rem; letter-spacing: 0.5px;
+                background: linear-gradient(90deg, #FF2EC4, #2E6FFF, #FFD166, #A78BFA);
+                -webkit-background-clip: text; background-clip: text; color: transparent;
+                margin-bottom: 0;
+            }
+            .euro-subtitle {
+                text-align:center; color:#c9b8e8; font-style:italic;
+                font-size: 1.05rem; margin-top: 0.3rem; margin-bottom: 1.5rem;
+            }
+            .euro-body { color: #e8e3f5; font-size: 1.02rem; line-height: 1.65; }
+            .euro-body b { color: #FFD166; }
+            .euro-body em { color: #7ec8ff; font-style: normal; font-weight: 600; }
+
+            div[data-testid="column"] {
+                background: rgba(255,255,255,0.06);
+                border: 1px solid rgba(255,255,255,0.15);
+                border-radius: 16px; padding: 1.4rem 1.2rem;
+                backdrop-filter: blur(6px);
+            }
+            h4 {
+                font-family: 'Montserrat', sans-serif !important;
+                color: #ffffff !important;
+            }
+            div[data-testid="column"] p { color: #cfc7e8 !important; }
+            [data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] p {
+                color: #cfc7e8 !important;
+            }
+            .euro-subtitle {
+                font-family: 'Inter', sans-serif !important;
+            }
+
+            div[data-testid="stButton"] button {
+                font-family: 'Montserrat', sans-serif; font-weight: 700;
+                border-radius: 10px; border: none;
+            }
+            div[data-testid="stButton"] button[kind="primary"] {
+                background: linear-gradient(90deg, #FF2EC4, #A855F7) !important;
+            }
+            div[data-testid="stButton"] button[kind="secondary"] {
+                background: linear-gradient(90deg, #2E6FFF, #00D9FF) !important;
+                color: #ffffff !important;
+            }
+        </style>
+        <div class="euro-title">EuroVision Voting Communities</div>
+        <div class="euro-subtitle">Does Neighbourhood Predict Alliance?</div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        """
+        <div class="euro-body">
+        Every year since 1975, Eurovision countries have voted for each other's songs -
+        and those votes form a real, measurable network. This project asks whether
+        <em>geography</em> predicts <em>alliance</em>: do neighbouring countries actually vote for
+        each other more than distant ones, and how has that changed as the contest's
+        voting rules evolved (jury-only through 2015, jury + public vote from 2016)?
+        <br><br>
+        Using <b>Normalised Voting Share (NVS)</b> to make scores comparable across eras,
+        and <b>Louvain community detection</b> to find voting "blocs" automatically
+        (not chosen by hand), this project traces how those blocs reorganised between
+        1975-1999 and 2000-2025 - and surfaces the loyalest pairs, the most one-sided
+        relationships, and the countries whose alliances shifted the most.
+        <br><br>
+        Choose how you'd like to explore it:
+        </div>
+        <br>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("#### &#127917; Interactive Version")
+        st.caption(
+            "The full poster - design submitted to the GD Contest 2026 - "
+            "as a live page. Hover any country or voting tie "
+            "for details."
+        )
+        if st.button("Open Interactive Poster", width="stretch", type="primary"):
+            _go("interactive")
+            st.rerun()
+    with col2:
+        st.markdown("#### &#128202; Exploratory Tool")
+        st.caption(
+            "The full analytical dashboard used to build this project: NVS matrices, "
+            "community detection, pair-trend analysis, and every draft visualisation "
+            "considered along the way."
+        )
+        if st.button("Open Exploratory Dashboard", width="stretch"):
+            _go("exploratory")
+            st.rerun()
+    st.stop()
+
+elif st.session_state["page"] == "interactive":
+    st.markdown(
+        """
+        <style>
+            [data-testid="stAppViewContainer"] > .main .block-container {
+                padding: 0 !important;
+                max-width: 100% !important;
+            }
+            [data-testid="stHeader"] { display: none !important; }
+            iframe {
+                position: fixed !important;
+                top: 0; left: 0;
+                width: 100vw !important;
+                height: 100vh !important;
+                border: none !important;
+                z-index: 1;
+            }
+            div[data-testid="stButton"] {
+                position: fixed !important;
+                top: 14px; left: 14px;
+                z-index: 1000;
+                width: fit-content !important;
+            }
+            div[data-testid="stButton"] button {
+                background: rgba(10,10,20,0.9) !important;
+                color: #FFD166 !important;
+                border: 1px solid #FFD166 !important;
+                font-weight: 700 !important;
+                font-size: 12px !important;
+                padding: 2px 10px !important;
+                min-height: 28px !important;
+                line-height: 1.2 !important;
+                border-radius: 6px !important;
+            }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    if st.button("\u2190 Back to home", key="back_from_interactive"):
+        _go("landing")
+        st.rerun()
+    from pathlib import Path
+    import streamlit.components.v1 as components
+    poster_path = Path(__file__).parent / "GD_v1.html"
+    poster_html = poster_path.read_text(encoding="utf-8")
+    # a tall height so the iframe's own content is never internally clipped;
+    # the CSS above then stretches the iframe element itself to fill the
+    # full viewport regardless of this value, giving a true full-page feel
+    components.html(poster_html, height=2000, scrolling=True)
+    st.stop()
+
+else:
+    _back_col, _ = st.columns([1, 6])
+    with _back_col:
+        if st.button("\u2190 Back to home"):
+            _go("landing")
+            st.rerun()
+    st.markdown(
+        """
+        <style>
+            @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@700;800&family=Inter:wght@400;500;600&display=swap');
+            .stApp {
+                background-color: #fcfcfd !important;
+                background-image: none !important;
+            }
+            [data-testid="stAppViewContainer"] {
+                background: #fcfcfd !important;
+            }
+            [data-testid="stSidebar"] {
+                background-color: #f8fafc;
+            }
+            html, body, [class*="css"], p, div, span, li {
+                font-family: 'Inter', sans-serif !important;
+            }
+            [data-testid="stIconMaterial"], [data-icon], .material-icons,
+            span[class*="Material"] {
+                font-family: 'Material Symbols Rounded', 'Material Icons', sans-serif !important;
+            }
+            h1, h2, h3, h4 {
+                font-family: 'Montserrat', sans-serif !important;
+                font-weight: 800 !important;
+                color: #111827;
+            }
+            .stMetric {
+                background-color: #ffffff;
+                border: 1px solid #e5e7eb;
+                border-radius: 12px;
+                padding: 10px;
+            }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
 
 st.title("Eurovision Voting Explorer")
 st.caption(
@@ -601,9 +807,9 @@ DRAFT_REGISTRY = {
     "12. Radial Tidy Tree + HEB":                       "radial_tidy_tree",
     "13. Geographic Story Map — Five Acts":             "story_map",
     "14. Bloc Territory Map — Who Dominated?":          "bloc_territory_map",
-    "15. Jury vs Public — Divergence Network":          "jury_public_divergence",
-    "16. GD Contest 2026 Poster — Voting Communities":  "gd_contest_poster",
-    "17. Community Patterns Map":                       "community_patterns_map",
+    # "15. Jury vs Public — Divergence Network":          "jury_public_divergence",
+    # "16. GD Contest 2026 Poster — Voting Communities":  "gd_contest_poster",
+    "15. Community Patterns Map":                       "community_patterns_map",
 }
 
 # ---------------------------------------------------------------------------
