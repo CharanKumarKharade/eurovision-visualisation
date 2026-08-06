@@ -806,10 +806,10 @@ DRAFT_REGISTRY = {
     "11b. Split-Triangle Matrix (dark)":                "split_triangle_matrix_dark",
     "12. Radial Tidy Tree + HEB":                       "radial_tidy_tree",
     "13. Geographic Story Map — Five Acts":             "story_map",
-    "14. Bloc Territory Map — Who Dominated?":          "bloc_territory_map",
+    #"14. Bloc Territory Map — Who Dominated?":          "bloc_territory_map",
     # "15. Jury vs Public — Divergence Network":          "jury_public_divergence",
     # "16. GD Contest 2026 Poster — Voting Communities":  "gd_contest_poster",
-    "15. Community Patterns Map":                       "community_patterns_map",
+    "14. Community Patterns Map":                       "community_patterns_map",
 }
 
 # ---------------------------------------------------------------------------
