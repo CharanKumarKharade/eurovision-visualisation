@@ -2279,7 +2279,7 @@ def build_hierarchical_bloc_poster(
         title=dict(
             text=(
                 "<br><span style='font-size:13px;color:#6b7280;'>"
-                "From full history to era split to concrete evidence · 1975–2025</span>"
+                "From full history to era split."
             ),
             x=0.5, xanchor="center",
             font=dict(size=18, family="Georgia, serif", color="#111827"),
